@@ -40,6 +40,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -366,6 +367,9 @@ class ReaderViewModel(
                     showPosition(position)
                 }
             }
+        } catch (e: CancellationException) {
+            // 退出阅读/换源取消了这次进书，不是"打开失败"。吞掉会误触发自动换源、改掉用户的源。
+            throw e
         } catch (e: Exception) {
             _state.value = _state.value.copy(loading = false, error = e.message ?: "打开书籍失败")
             // 书源被删了、目录拉不到 —— 这两种进书就废的情况，Legado 原生也自动换源
@@ -804,8 +808,8 @@ class ReaderViewModel(
             // 用户亲自选了源：掐掉可能还在跑的自动换源，否则它探测成功后会把用户的选择覆盖掉
             autoChangeJob?.cancel()
             autoChangeUsed = true
-            // 旧源的预取还在飞：清完缓存后它们回来会把旧正文写进新源的缓存目录
-            prefetchJob?.cancel()
+            // 旧源的预取还在飞：必须等它停，否则清完缓存后它们回来会把旧正文写进新源的缓存目录
+            stopPrefetch()
             val rule = sourceRepo.getRule(candidate.sourceId)
             if (rule == null) {
                 _state.value = _state.value.copy(changingSource = false, error = "书源不存在")
@@ -921,9 +925,9 @@ class ReaderViewModel(
                 return@launch
             }
 
-            // 旧源的预取还在天上飞。不掐掉的话，changeSource 清完缓存之后它们才回来，
+            // 旧源的预取还在天上飞。必须等它停，否则 changeSource 清完缓存之后它们才回来，
             // 会把**旧源的正文**写进新源的缓存目录，并给新目录的同序号章节打上"已缓存"。
-            prefetchJob?.cancel()
+            stopPrefetch()
 
             val snapshot = b.sourceId?.let { sid ->
                 b.bookUrl?.let { url ->
@@ -976,7 +980,7 @@ class ReaderViewModel(
                 return@launch
             }
             _state.value = _state.value.copy(changingSource = true)
-            prefetchJob?.cancel()
+            stopPrefetch()
 
             val back = SearchResult(
                 title = b.title,
@@ -1471,9 +1475,25 @@ class ReaderViewModel(
                 if (!isActive) return@launch
                 // 已缓存的话 prefetchChapter 直接命中缓存，几乎不花钱；没缓存才抓。
                 // 网络书这条路径禁止开 WebView（见 NetReaderBookSource.prefetchChapter）。
-                runCatching { src.prefetchChapter(i) }
+                try {
+                    src.prefetchChapter(i)
+                } catch (e: CancellationException) {
+                    // 换源/退出取消了预取。runCatching 会吞掉，循环继续往下章写，和清缓存打架。
+                    throw e
+                } catch (_: Exception) {
+                    // 预取失败不影响当前阅读，静默跳过
+                }
             }
         }
+    }
+
+    /**
+     * 换源前必须等预取协程真正停掉。
+     * [Job.cancel] 只发信号：预取可能还卡在写缓存，随后 [ChapterContentCache.clear] 会被它写脏。
+     */
+    private suspend fun stopPrefetch() {
+        prefetchJob?.cancelAndJoin()
+        prefetchJob = null
     }
 
     /** 只保留 center±1 的分页结果（测量结果持有 TextLayoutResult，较重） */

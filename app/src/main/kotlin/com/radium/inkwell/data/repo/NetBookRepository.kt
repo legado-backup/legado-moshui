@@ -135,7 +135,7 @@ class NetBookRepository(
     }
 
     /** 刷新目录（追更）。返回**新增的章节数**（0 = 已经是最新的） */
-    suspend fun refreshToc(book: BookEntity, rule: BookSourceRule): Result<Int> = runCatching {
+    suspend fun refreshToc(book: BookEntity, rule: BookSourceRule): Result<Int> = try {
         val toc = engine.getToc(
             rule, book.tocUrl ?: book.bookUrl ?: error("缺少目录地址"),
             bookUrl = book.bookUrl.orEmpty(),
@@ -194,7 +194,11 @@ class NetBookRepository(
                 bookDao.update(refreshed.copy(updatedAt = System.currentTimeMillis()))
             }
         }
-        added
+        Result.success(added)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Result.failure(e)
     }
 
     /**
@@ -256,7 +260,7 @@ class NetBookRepository(
          * 走对齐反而会把用户读到的位置弄丢，撤销就成了另一次破坏。
          */
         restore: ReadAnchor? = null,
-    ): Result<Unit> = runCatching {
+    ): Result<Unit> = try {
         val (detail, toc) = fetchDetailAndToc(newRule, newResult.bookUrl)
         check(toc.isNotEmpty()) { "新书源目录为空" }
         // 网络往返期间用户可能已翻了很多页，进度早不是传入快照那一刻的了。写库前重读最新行，
@@ -284,6 +288,11 @@ class NetBookRepository(
                 )
             )
         }
+        Result.success(Unit)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Result.failure(e)
     }
 
     /** 阅读位置的真身：第几章 + 章内第几个字 */
