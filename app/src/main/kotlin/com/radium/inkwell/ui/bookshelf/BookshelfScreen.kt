@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -207,12 +206,13 @@ fun BookshelfScreen(
         // 顶栏用「实心 + 底边 scrim」叠在列表上：列表仍铺满整页、可滚到栏下，
         // 但标题区完全不透明（MD3 tonal 表面），只在栏底一条带上溶进内容。
         // **不能**把这栏挂进 Scaffold.topBar —— Scaffold 会把 content 垫到栏下。
-        // insets 也在此掐掉，状态栏/导航栏高度由顶栏遮罩与列表各自认领。
+        // 状态栏高度由顶栏遮罩自己吃；Scaffold 只负责把**底部导航栏 inset** 传给 content
+        // （padding 必须被用到，否则 lint UnusedMaterial3ScaffoldPaddingParameter 会在 CI 挡下）。
         containerColor = pageColor,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        contentWindowInsets = WindowInsets.navigationBars,
         snackbarHost = { AppSnackbarHost(snackbar) },
-    ) { _ ->
-        val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    ) { padding ->
+        val navBottom = padding.calculateBottomPadding()
         GlassHeaderHost(
             tint = pageColor,
             baseColor = pageColor,
