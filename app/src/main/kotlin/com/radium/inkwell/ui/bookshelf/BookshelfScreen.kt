@@ -80,7 +80,6 @@ import com.radium.inkwell.ui.components.ContentListDefaults
 import com.radium.inkwell.ui.components.ContentListItem
 import com.radium.inkwell.ui.components.animationsEnabled
 import com.radium.inkwell.ui.components.Dimens
-import com.radium.inkwell.ui.components.Glass
 import com.radium.inkwell.ui.components.GlassHeaderHost
 import com.radium.inkwell.ui.components.SettingGroupPosition
 import com.radium.inkwell.ui.components.SettingRow
@@ -194,9 +193,8 @@ fun BookshelfScreen(
 
     // 与设置页同一套画布：浅色灰底、深色黑底（见 settingsPageColor），进出设置不再闪白。
     val pageColor = settingsPageColor()
-    // 玻璃 tint：画布色降透明度，叠在模糊后的书封上；底色仍铺 pageColor，没书滚过时不留色差
-    val glassTint = pageColor.copy(alpha = Glass.TintAlpha)
-    // 顶栏容器全透明：底色与磨砂由 GlassHeaderHost 统一画，TopAppBar 只负责内容与 inset
+    // 顶栏容器由 GlassHeaderHost 画实心画布色 + 底边 scrim（MD3 无磨砂玻璃组件，
+    // 不做 backdrop-blur，书封不会透进标题区）。TopAppBar 自己只负责内容与 inset。
     val topBarColors = TopAppBarDefaults.topAppBarColors(
         containerColor = Color.Transparent,
         scrolledContainerColor = Color.Transparent,
@@ -206,16 +204,17 @@ fun BookshelfScreen(
         // 栏之间切，高度不同就会跳；二是标题位是长按入口、副标题还要播追更进度，两段式会把它
         // 摊到大标题的位置上。下面还压着隐藏区与下拉刷新，再叠一层折叠手势也容易互相抢。
         //
-        // 顶栏区做成磨砂玻璃：列表铺到玻璃下面，上滚时书封从栏后滑过，透过模糊层能看见。
-        // **不能**把这栏挂进 Scaffold.topBar —— Scaffold 会把 content 垫到栏下，书滚不进去，
-        // 玻璃也就无物可透。insets 也在此掐掉，状态栏/导航栏高度由玻璃头与列表各自认领。
+        // 顶栏用「实心 + 底边 scrim」叠在列表上：列表仍铺满整页、可滚到栏下，
+        // 但标题区完全不透明（MD3 tonal 表面），只在栏底一条带上溶进内容。
+        // **不能**把这栏挂进 Scaffold.topBar —— Scaffold 会把 content 垫到栏下。
+        // insets 也在此掐掉，状态栏/导航栏高度由顶栏遮罩与列表各自认领。
         containerColor = pageColor,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { AppSnackbarHost(snackbar) },
     ) { _ ->
         val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
         GlassHeaderHost(
-            tint = glassTint,
+            tint = pageColor,
             baseColor = pageColor,
             modifier = Modifier.fillMaxSize(),
             header = {
