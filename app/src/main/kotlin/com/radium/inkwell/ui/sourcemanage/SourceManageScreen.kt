@@ -32,9 +32,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import com.radium.inkwell.ui.components.AppSnackbarHost
+import com.radium.inkwell.ui.components.AppTextButton
 import androidx.compose.material3.Switch
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -319,7 +320,7 @@ fun SourceManageScreen(
                             modifier = Modifier.padding(top = Dimens.gapXS),
                         )
                     }
-                    TextButton(onClick = viewModel::cancelCheck) { Text("停止") }
+                    AppTextButton(onClick = viewModel::cancelCheck) { Text("停止") }
                 }
             }
             // 校验完最想干的事。禁用放在删除前面：删是不可逆的，而站点抽风、临时封 IP
@@ -335,10 +336,15 @@ fun SourceManageScreen(
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = { viewModel.setFilter(SourceFilter.FAILED) }) { Text("只看失效") }
-                    TextButton(onClick = viewModel::disableInvalid) { Text("禁用") }
-                    TextButton(onClick = { confirmDeleteInvalid = true }) {
-                        Text("删除", color = MaterialTheme.colorScheme.error)
+                    AppTextButton(onClick = { viewModel.setFilter(SourceFilter.FAILED) }) { Text("只看失效") }
+                    AppTextButton(onClick = viewModel::disableInvalid) { Text("禁用") }
+                    AppTextButton(
+                        onClick = { confirmDeleteInvalid = true },
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) {
+                        Text("删除")
                     }
                 }
             }

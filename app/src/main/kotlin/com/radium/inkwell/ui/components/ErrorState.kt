@@ -14,12 +14,10 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
 
 /**
  * 错误态。与 [EmptyState] 对称。
@@ -76,7 +74,7 @@ fun ErrorState(
             }
             if (tertiaryLabel != null && onTertiary != null) {
                 Spacer(Modifier.height(Dimens.gapS))
-                TextButton(onClick = onTertiary) { Text(tertiaryLabel) }
+                AppTextButton(onClick = onTertiary) { Text(tertiaryLabel) }
             }
         }
     }

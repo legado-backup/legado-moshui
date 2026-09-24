@@ -22,7 +22,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.radium.inkwell.core.model.ContentElement
@@ -112,7 +111,7 @@ fun RssArticleScreen(
                     )
                     is ContentElement.Paragraph -> Text(
                         el.text,
-                        Modifier.padding(vertical = 6.dp),
+                        Modifier.padding(vertical = Dimens.gapS),
                         style = MaterialTheme.typography.bodyLarge,
                     )
                     is ContentElement.Image -> AsyncImage(
@@ -144,7 +143,7 @@ fun RssArticleScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            Spacer(Modifier.height(48.dp))
+            Spacer(Modifier.height(Dimens.touchTarget))
         }
     }
 }

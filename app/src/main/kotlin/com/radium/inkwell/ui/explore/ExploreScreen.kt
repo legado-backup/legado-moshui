@@ -23,10 +23,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import com.radium.inkwell.ui.components.AppLoadingIndicator
+import com.radium.inkwell.ui.components.AppTextButton
 import com.radium.inkwell.ui.components.BackButton
 import com.radium.inkwell.ui.components.AppSnackbarHost
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -88,7 +88,7 @@ fun ExploreScreen(
             TopAppBar(
                 title = {
                     // 选书源统一走底部面板：从前是裸 DropdownMenu，弹个小浮层、选中态全靠猜
-                    TextButton(onClick = { sourceMenuOpen = true }) {
+                    AppTextButton(onClick = { sourceMenuOpen = true }) {
                         Text(
                             state.currentSource?.name ?: "发现",
                             maxLines = 1,

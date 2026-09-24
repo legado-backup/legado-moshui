@@ -21,7 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.radium.inkwell.ui.components.AppTextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -248,7 +248,7 @@ fun BookDetailScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             if (b.type == BookType.NET) {
-                                TextButton(
+                                AppTextButton(
                                     onClick = { triggerRefresh(quiet = false) },
                                     enabled = !refreshing,
                                 ) {
@@ -328,7 +328,7 @@ private fun Header(
                     maxLines = if (introExpanded) Int.MAX_VALUE else 4,
                     overflow = TextOverflow.Ellipsis,
                 )
-                TextButton(onClick = { introExpanded = !introExpanded }) {
+                AppTextButton(onClick = { introExpanded = !introExpanded }) {
                     Text(if (introExpanded) "收起" else "展开")
                 }
             }

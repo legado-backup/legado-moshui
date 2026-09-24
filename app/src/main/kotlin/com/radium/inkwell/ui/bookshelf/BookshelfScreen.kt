@@ -2,6 +2,7 @@ package com.radium.inkwell.ui.bookshelf
 
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
+import androidx.activity.compose.ReportDrawnWhen
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -135,6 +136,9 @@ fun BookshelfScreen(
     viewModel: BookshelfViewModel,
 ) {
     val books by viewModel.books.collectAsStateWithLifecycle()
+    val shelfReady by viewModel.shelfReady.collectAsStateWithLifecycle()
+    // 首批书架数据落地再报 fully drawn，启动基准才是「看见书」而不是首帧空白
+    ReportDrawnWhen { shelfReady }
     // 换算进书展开原点用：把封面在窗口里的坐标除以窗口尺寸
     val windowSize = LocalWindowInfo.current.containerSize
     val allBooks by viewModel.allBooks.collectAsStateWithLifecycle()

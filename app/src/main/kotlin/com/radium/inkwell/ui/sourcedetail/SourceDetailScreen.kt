@@ -27,7 +27,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.ui.components.CollectMessages
 import com.radium.inkwell.ui.components.CompactTextField
@@ -93,7 +92,7 @@ fun SourceDetailScreen(
             if (state.testReport.isNotBlank()) {
                 Text(
                     state.testReport,
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                     modifier = Modifier.padding(top = Dimens.gapM),
                 )
             }
@@ -107,10 +106,7 @@ fun SourceDetailScreen(
             SelectionContainer {
                 Text(
                     state.jsonText,
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                    ),
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 )
             }

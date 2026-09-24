@@ -13,7 +13,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.radium.inkwell.ui.components.AppTextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,7 +78,7 @@ fun ChangeSourceSheet(
                     )
                 } else if (!overlay.changingSource) {
                     // 会话内复用上次结果；书源有增删/站点恢复时用这个主动重搜
-                    TextButton(onClick = onRefresh) {
+                    AppTextButton(onClick = onRefresh) {
                         Text("重新搜索")
                     }
                 }

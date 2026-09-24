@@ -1,10 +1,13 @@
 package com.radium.inkwell.ui.components
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonColors
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -14,6 +17,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -106,6 +110,33 @@ fun BackButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     AppIconButton(onClick = onClick, modifier = modifier) {
         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
     }
+}
+
+/**
+ * 行内文字按钮（展开/收起、撤销、停止校验）。
+ *
+ * 和 [AppIconButton] 同理：显式走带 `shapes` 的 Expressive 重载，页面别再裸写 [TextButton]。
+ * 不要拿它冒充 [PrimaryButton] / [SecondaryButton] —— 那是实心/描边主操作。
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun AppTextButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    contentPadding: PaddingValues = ButtonDefaults.TextButtonContentPadding,
+    colors: ButtonColors = ButtonDefaults.textButtonColors(),
+    content: @Composable RowScope.() -> Unit,
+) {
+    TextButton(
+        onClick = onClick,
+        shapes = ButtonDefaults.shapes(),
+        modifier = modifier,
+        enabled = enabled,
+        contentPadding = contentPadding,
+        colors = colors,
+        content = content,
+    )
 }
 
 /**

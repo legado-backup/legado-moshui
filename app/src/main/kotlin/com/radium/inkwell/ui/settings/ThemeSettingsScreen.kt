@@ -213,9 +213,9 @@ private fun ThemeSwatch(
                     contentDescription = null,
                     Modifier
                         .align(Alignment.BottomEnd)
-                        .size(16.dp)
+                        .size(Dimens.iconSm)
                         .background(MaterialTheme.colorScheme.primary, CircleShape)
-                        .padding(2.dp),
+                        .padding(Dimens.gapXS),
                     tint = MaterialTheme.colorScheme.onPrimary,
                 )
             }
@@ -388,12 +388,12 @@ private fun LabeledSlider(
     onFinished: () -> Unit,
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(top = 4.dp),
+        Modifier.fillMaxWidth().padding(top = Dimens.gapXS),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             label,
-            Modifier.width(120.dp),
+            Modifier.width(Dimens.sliderLabelWidth),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

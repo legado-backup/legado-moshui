@@ -24,7 +24,7 @@ import com.radium.inkwell.ui.components.AppTopBar
 import com.radium.inkwell.ui.components.rememberAppTopBarScroll
 import com.radium.inkwell.ui.components.topBarScroll
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.radium.inkwell.ui.components.AppTextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -78,7 +78,7 @@ fun BookPreviewScreen(
                 LoadingState(label = state.loadingLabel)
                 // 卡在某个源上时别只能干等：有别的书源就给出换源，不必等超时
                 if (state.sources.size > 1) {
-                    TextButton(
+                    AppTextButton(
                         onClick = { sourcePickerOpen = true },
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -179,7 +179,7 @@ private fun Header(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 if (state.sources.size > 1) {
-                    TextButton(onClick = onOpenSourcePicker, contentPadding = PaddingValues(0.dp)) {
+                    AppTextButton(onClick = onOpenSourcePicker, contentPadding = PaddingValues(0.dp)) {
                         Text("换源（${state.sources.size} 个书源）", style = MaterialTheme.typography.labelMedium)
                     }
                 }
@@ -213,7 +213,7 @@ private fun Header(
                     maxLines = if (introExpanded) Int.MAX_VALUE else 4,
                     overflow = TextOverflow.Ellipsis,
                 )
-                TextButton(onClick = { introExpanded = !introExpanded }) {
+                AppTextButton(onClick = { introExpanded = !introExpanded }) {
                     Text(if (introExpanded) "收起" else "展开")
                 }
             }

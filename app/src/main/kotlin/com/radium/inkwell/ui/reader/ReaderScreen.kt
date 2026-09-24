@@ -41,9 +41,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.ui.text.style.TextAlign
 import com.radium.inkwell.ui.components.AppAlertDialog
+import com.radium.inkwell.ui.components.AppTextButton
 import com.radium.inkwell.ui.components.AppLoadingIndicator
 import com.radium.inkwell.ui.components.PrimaryButton
 import com.radium.inkwell.ui.components.SecondaryButton
@@ -318,8 +319,13 @@ fun ReaderScreen(
                         }
                     }
                     Spacer(Modifier.height(Dimens.gapS))
-                    TextButton(onClick = requestExit) {
-                        Text("返回书架", color = Color(session.settings.theme.footerColor))
+                    AppTextButton(
+                        onClick = requestExit,
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = Color(session.settings.theme.footerColor),
+                        ),
+                    ) {
+                        Text("返回书架")
                     }
                 }
             }
@@ -491,8 +497,8 @@ fun ReaderScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface,
                         )
-                        TextButton(onClick = { viewModel.undoAutoChange() }) { Text("撤销") }
-                        TextButton(onClick = { viewModel.dismissAutoChanged() }) { Text("知道了") }
+                        AppTextButton(onClick = { viewModel.undoAutoChange() }) { Text("撤销") }
+                        AppTextButton(onClick = { viewModel.dismissAutoChanged() }) { Text("知道了") }
                     }
                 }
             }
@@ -569,7 +575,7 @@ fun ReaderScreen(
             visible = overlay.toast != null,
             enter = scrimEnter(),
             exit = scrimExit(),
-            modifier = Modifier.align(Alignment.TopCenter).padding(top = 48.dp),
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = Dimens.touchTarget),
         ) {
             Text(
                 lastToast.value,

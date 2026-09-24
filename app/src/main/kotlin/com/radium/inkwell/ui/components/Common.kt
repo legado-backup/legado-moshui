@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -42,6 +43,7 @@ import coil3.size.Precision
 import com.radium.inkwell.core.util.htmlToPlainText
 
 /** 空状态：图标 + 标题 + 提示 + 可选动作，全应用统一形态 */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun EmptyState(
     icon: ImageVector,
@@ -78,7 +80,11 @@ fun EmptyState(
                 )
             }
             if (actionLabel != null && onAction != null) {
-                TextButton(onClick = onAction, Modifier.padding(top = Dimens.gapS)) {
+                TextButton(
+                    onClick = onAction,
+                    shapes = ButtonDefaults.shapes(),
+                    modifier = Modifier.padding(top = Dimens.gapS),
+                ) {
                     Text(actionLabel)
                 }
             }
@@ -264,6 +270,7 @@ internal fun colorIndex(title: String): Int {
  * 默认白卡（[settingsStackListColors]）。调用页必须铺灰底 [settingsPageColor]，
  * 否则白卡坐在默认 `surface` 白画布上，圆角缝里会透出一块白板 —— 搜索页曾经就是这样。
  */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun BookListRow(
     title: String,
@@ -315,7 +322,11 @@ fun BookListRow(
         trailingContent = {
             // 转圈叠在按钮上，而不是替换它 —— 24dp 的转圈换掉 48dp 的按钮，整行高度会跳一下
             Box(contentAlignment = Alignment.Center) {
-                TextButton(onClick = onTrailing, enabled = trailingEnabled && !trailingLoading) {
+                TextButton(
+                    onClick = onTrailing,
+                    shapes = ButtonDefaults.shapes(),
+                    enabled = trailingEnabled && !trailingLoading,
+                ) {
                     Text(
                         trailingLabel,
                         color = if (trailingLoading) Color.Transparent else LocalContentColor.current,

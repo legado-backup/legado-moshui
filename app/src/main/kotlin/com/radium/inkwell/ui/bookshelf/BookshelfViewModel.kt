@@ -163,6 +163,14 @@ class BookshelfViewModel(
     val allBooks: StateFlow<List<BookEntity>> = bookRepo.books
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /**
+     * Room 第一帧已到（含空架）。启动指标用它报 timeToFullDisplay，
+     * 而不是首帧空白 —— 书架书是异步来的，TTID 测的不是用户看见的那一帧。
+     */
+    val shelfReady: StateFlow<Boolean> = bookRepo.books
+        .map { true }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
     val messages = MessageBus()
 
     // ---- 分组 ----

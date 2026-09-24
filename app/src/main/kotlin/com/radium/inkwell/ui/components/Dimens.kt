@@ -113,4 +113,6 @@ object Dimens {
     val sliderTrack = 4.dp
     /** 滑块圆点拇指。远矮于 Expressive 竖条 Handle（4×44） */
     val sliderThumb = 12.dp
+    /** 主题页滑块左侧标签列宽，避免「字号」「行距」和滑块对不齐 */
+    val sliderLabelWidth = 120.dp
 }

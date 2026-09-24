@@ -19,7 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.radium.inkwell.ui.components.AppTextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -77,7 +77,7 @@ fun SelectionToolbar(
                     Modifier.fillMaxWidth().padding(top = Dimens.gapS),
                     horizontalArrangement = Arrangement.End,
                 ) {
-                    TextButton(onClick = {
+                    AppTextButton(onClick = {
                         replacing = false
                         replacement = ""
                     }) { Text("取消") }
