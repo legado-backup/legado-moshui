@@ -74,8 +74,21 @@ class NetBookRepository(
         netBookId(sourceId, bookUrl).takeIf { bookDao.getById(it) != null }
 
     /** 从指定章节开始读：预览页点目录用 */
-    suspend fun setReadPosition(bookId: String, chapterIndex: Int) {
-        bookDao.updateProgress(bookId, chapterIndex, 0, System.currentTimeMillis())
+    /**
+     * 预览页点了第 [chapterIndex] 章。书架上的那本可能是别的书源（甚至本地书）加的，
+     * 预览目录的序号在它那里不通用：直接写序号会打开错的章，超出它的目录时进书即报错。
+     * 所以按标题在那本书自己的目录里找回对应章；对不上就不动原进度。
+     */
+    suspend fun setReadPosition(bookId: String, chapterIndex: Int, chapterTitle: String) {
+        val chapters = chapterDao.getByBook(bookId)
+        val index = chapters.firstOrNull { it.index == chapterIndex && it.title == chapterTitle }?.index
+            ?: TitleMatch.alignChapter(
+                chapterTitle, chapterIndex, chapters,
+                titleOf = { it.title },
+                indexOf = { it.index },
+            )?.index
+            ?: return
+        bookDao.updateProgress(bookId, index, 0, System.currentTimeMillis())
     }
 
     private suspend fun persist(
@@ -233,8 +246,12 @@ class NetBookRepository(
         toc: List<RemoteChapter>,
     ): Pair<Int, Int> {
         if (book == null) return 0 to 0
+        // 本机没有这一章的目录行（同步来的书目录不进备份，或进度来自追更更快的另一台设备）：
+        // 没有旧标题可比，也就没有「目录错位」的证据，偏移照旧信任；只有序号被夹取时才作废。
         val oldTitle = chapterDao.get(bookId, book.readChapterIndex)?.title
-            ?: return book.readChapterIndex.coerceIn(0, toc.lastIndex) to 0
+            ?: return book.readChapterIndex.coerceIn(0, toc.lastIndex).let { index ->
+                index to if (index == book.readChapterIndex) book.readCharOffset else 0
+            }
         val matched = TitleMatch.alignChapter(
             oldTitle, book.readChapterIndex, toc,
             titleOf = { it.title },

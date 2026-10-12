@@ -116,7 +116,7 @@ class ReplaceRuleRepository(private val dao: ReplaceRuleDao) {
             bookId = bookId,
         )
 
-    suspend fun setEnabled(id: String, enabled: Boolean) = dao.setEnabled(id, enabled)
+    suspend fun setEnabled(id: String, enabled: Boolean) = dao.setEnabled(id, enabled, System.currentTimeMillis())
 
     suspend fun delete(ids: List<String>) = dao.softDeleteByIds(ids, System.currentTimeMillis())
 

@@ -21,6 +21,14 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # Compose 1.13.0-beta01 要求按 37.1 编译。托管镜像通常只有 37.0，缺了 checkAarMetadata 直接失败。
+      - name: Install Android SDK platform 37.1
+        run: |
+          SM="$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" -path '*/cmdline-tools/*/bin/sdkmanager' | head -n 1)"
+          test -n "$SM"
+          yes | "$SM" --licenses >/dev/null || true
+          "$SM" --install "platforms;android-37.1"
+
       - name: Run unit tests
         run: ./gradlew test
 

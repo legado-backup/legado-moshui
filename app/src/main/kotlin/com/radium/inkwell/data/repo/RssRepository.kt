@@ -26,7 +26,7 @@ class RssRepository(
     suspend fun getRule(id: String): RssSourceRule? =
         dao.getById(id)?.let { runCatching { RssSourceRule.fromJson(it.json) }.getOrNull() }
 
-    suspend fun setEnabled(id: String, enabled: Boolean) = dao.setEnabled(id, enabled)
+    suspend fun setEnabled(id: String, enabled: Boolean) = dao.setEnabled(id, enabled, System.currentTimeMillis())
 
     suspend fun delete(id: String) = dao.softDeleteById(id, System.currentTimeMillis())
 

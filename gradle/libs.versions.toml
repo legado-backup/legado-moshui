@@ -1,11 +1,11 @@
 [versions]
 # 应用版本唯一来源：versionCode 由它推导，Release tag 必须与之一致（vX.Y.Z）
-inkwell = "0.3.7"
-agp = "9.4.0"
-kotlin = "2.4.20"
+inkwell = "0.3.8-beta.1"
+agp = "9.4.1"
+kotlin = "2.4.21"
 # KSP 自 2.3.0 起改用独立版本号（不再是「Kotlin版本-KSP版本」）。
 # 2.3.10 起已兼容 Kotlin 2.4 的默认 module name（`${group}:${name}` 里的冒号）。
-# 复核过（2026-09-16）：KSP 最新仍是 2.3.12，没有 2.4.x 号；跟 Kotlin 2.4.20 搭配即可。
+# 复核过（2026-09-16）：KSP 最新仍是 2.3.12，没有 2.4.x 号；跟 Kotlin 2.4.2x 搭配即可。
 ksp = "2.3.12"
 coroutines = "1.11.0"
 serialization = "1.11.0"
@@ -17,11 +17,11 @@ serialization = "1.11.0"
 # 稳定 BOM 只收稳定版，永远给不到 alpha，所以启用 Expressive 就必须离开稳定 BOM。
 #
 # 为什么换整个 BOM，而不是只把 material3 单钉成 alpha：单钉也拦不住 —— material3 1.5.0-alpha
-# 要求 foundation/ui/animation 跟它走（2026.08.01 是 1.13.0-alpha02），会把稳定 BOM 的
-# 1.12.x 直接顶掉，栈照样进预发布，只是变成「toml 写稳定号、实际跑 alpha」。
-# 换 alpha BOM 反而更稳：它把整栈钉在同一快照。升 BOM 前先读 material3 1.5.0-alpha 的
+# 要求 foundation/ui/animation 跟它走（2026.10.00 是 1.13.0-beta01 + material3 1.5.0-beta01），
+# 会把稳定 BOM 的 1.12.x 直接顶掉，栈照样进预发布，只是变成「toml 写稳定号、实际跑 alpha」。
+# 换 alpha BOM 反而更稳：它把整栈钉在同一快照。升 BOM 前先读 material3 1.5.0 的
 # breaking change，别盲升。
-composeBom = "2026.08.01"
+composeBom = "2026.10.00"
 activityCompose = "1.13.0"
 # Navigation 3（与 Nav2 navigation-compose 不兼容，整图迁移）
 navigation3 = "1.2.0"
@@ -45,7 +45,7 @@ jsoup = "1.23.2"
 # `selectFirst(...)?.let { }` 这种推断就会炸。compileOnly：只给编译器看，不进包。
 jspecify = "1.0.1"
 rhino = "1.9.1"
-juniversalchardet = "2.5.0"
+juniversalchardet = "2.5.1"
 jsonPath = "3.0.0"
 xpath = "2.5.5"
 biometric = "1.4.0-alpha07"

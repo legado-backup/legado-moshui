@@ -376,6 +376,7 @@ class BookSourceEngineTest {
                 path == "/bleed/1_2" -> html(BLEED_1_2)
                 path == "/bleed/2" -> html(BLEED_2)
                 path == "/api/detail" -> json(API_DETAIL)
+                path == "/api/info" -> json(API_INFO)
                 path == "/api/book/777/toc" -> json(API_TOC)
                 path == "/dup/1" -> html(DUP_NAV)
                 path == "/dup/2" -> html(DUP_LAST)
@@ -455,6 +456,26 @@ class BookSourceEngineTest {
         val json = sourceJson(base)
             .replace("\"ruleBookInfo\": {", "\"ruleBookInfo\": { \"init\": \"@put:{\\\"n\\\":\\\"h1@text\\\"}\",")
             .replace("\"name\": \"h1@text\",", "\"name\": \"@get:{n}\",")
+        val detail = engine().getDetail(BookSourceRule.fromJson(json), "$base/book/1")
+        assertEquals("魔道修真", detail.title)
+    }
+
+    @Test
+    fun `详情 init 切换求值内容 —— JSON 接口源的 data 写法`() = runBlocking {
+        val json = """
+            {"bookSourceUrl":"$base","bookSourceName":"接口",
+             "ruleBookInfo":{"init":"$.data","name":"$.book_name","author":"$.author","tocUrl":"$.toc"}}
+        """.trimIndent()
+        val detail = engine().getDetail(BookSourceRule.fromJson(json), "$base/api/info")
+        assertEquals("接口小说", detail.title)
+        assertEquals("某人", detail.author)
+        assertEquals("$base/api/book/777/toc", detail.tocUrl)
+    }
+
+    @Test
+    fun `详情 init 只返回标量时不切换内容`() = runBlocking {
+        val json = sourceJson(base)
+            .replace("\"ruleBookInfo\": {", "\"ruleBookInfo\": { \"init\": \"<js>'ok'</js>\",")
         val detail = engine().getDetail(BookSourceRule.fromJson(json), "$base/book/1")
         assertEquals("魔道修真", detail.title)
     }
@@ -616,6 +637,9 @@ class BookSourceEngineTest {
         const val DUP_LAST = """<html><body><div id="content"><p>第二页内容。</p></div></body></html>"""
 
         const val API_DETAIL = """{"id":777,"name":"接口小说"}"""
+
+        const val API_INFO =
+            """{"code":0,"data":{"book_name":"接口小说","author":"某人","toc":"/api/book/777/toc"}}"""
 
         const val API_TOC =
             """{"chapters":[{"t":"第一章 起","u":"/api/c/1"},{"t":"第二章 承","u":"/api/c/2"}]}"""

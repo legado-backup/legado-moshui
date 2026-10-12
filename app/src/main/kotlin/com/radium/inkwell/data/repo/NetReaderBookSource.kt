@@ -5,7 +5,7 @@ import com.radium.inkwell.core.source.BookSourceEngine
 import com.radium.inkwell.core.source.BookSourceRule
 import com.radium.inkwell.data.db.dao.ChapterDao
 import com.radium.inkwell.data.db.entity.ChapterEntity
-import com.radium.inkwell.core.source.PrivateNetworkGuardDns
+import com.radium.inkwell.core.source.guardPrivateNetwork
 import com.radium.inkwell.reader.api.ReaderBookSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -84,13 +84,13 @@ class NetReaderBookSource(
     private companion object {
         /**
          * 插图下载。地址同样由书源规则给出（不可信），所以和正文抓取一视同仁：
-         * 走内网拦截的 DNS，并配全套超时 —— 阅读器翻到带图的一页会等它，不能无限期等。
+         * 走内网拦截，并配全套超时 —— 阅读器翻到带图的一页会等它，不能无限期等。
          *
          * 建成 companion 的单例而非每本书新建：OkHttpClient 自带连接池和线程池，
          * 每开一本书造一个是白扔资源。
          */
         val IMAGE_HTTP: OkHttpClient = OkHttpClient.Builder()
-            .dns(PrivateNetworkGuardDns())
+            .guardPrivateNetwork()
             .connectTimeout(java.time.Duration.ofSeconds(15))
             .readTimeout(java.time.Duration.ofSeconds(20))
             .callTimeout(java.time.Duration.ofSeconds(45))

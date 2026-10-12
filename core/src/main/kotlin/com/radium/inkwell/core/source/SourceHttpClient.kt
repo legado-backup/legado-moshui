@@ -54,7 +54,7 @@ class SourceHttpClient(
 
     private val client: OkHttpClient = baseClient.newBuilder()
         .cookieJar(cookieJar)
-        .dns(PrivateNetworkGuardDns(allowPrivate = allowPrivateNetwork))
+        .guardPrivateNetwork(allowPrivate = allowPrivateNetwork)
         // 超时必须显式配：OkHttp 默认 connect/read/write 各 10 秒，且**没有 callTimeout**。
         // 没有总闸的话，一个每 9 秒吐一个字节的站能把这次调用无限期挂住 —— 而书源脚本那条路
         // 是 runBlocking 阻塞等待的（见 EngineJsHttp），挂住的是一整根 IO 线程，

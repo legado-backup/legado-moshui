@@ -236,7 +236,7 @@ class BookRepository(
     }
 
     suspend fun setGroup(id: String, group: String) {
-        bookDao.setGroup(id, group)
+        bookDao.setGroup(id, group, System.currentTimeMillis())
     }
 
     /** 打开书就把「有新章节」的红点清掉 —— 打开即已知晓 */
@@ -245,7 +245,7 @@ class BookRepository(
     }
 
     suspend fun setHidden(id: String, hidden: Boolean) {
-        bookDao.setHidden(id, hidden)
+        bookDao.setHidden(id, hidden, System.currentTimeMillis())
     }
 
     suspend fun saveProgress(id: String, chapterIndex: Int, charOffset: Int) {

@@ -33,4 +33,19 @@ class OfficialWebDavTest {
             OfficialWebDav.resolveDavUrl("https://dav.jianguoyun.com/dav"),
         )
     }
+
+    @Test
+    fun `应用码名字按设备区分，不再与旧的共用名字相同`() {
+        val a = OfficialWebDav.appPasswordName("1a2b3c4d-0000-0000-0000-000000000000", "Pixel 9")
+        val b = OfficialWebDav.appPasswordName("9f8e7d6c-0000-0000-0000-000000000000", "Pixel 9")
+        assertEquals("Inkwell Android · Pixel 9 · 1a2b3c4d", a)
+        assertTrue(a != b)
+        assertTrue(a != OfficialWebDav.APP_PASSWORD_NAME)
+    }
+
+    @Test
+    fun `机型缺失时不留空段`() {
+        assertEquals("Inkwell Android · 1a2b3c4d", OfficialWebDav.appPasswordName("1a2b3c4d", null))
+        assertEquals("Inkwell Android · 1a2b3c4d", OfficialWebDav.appPasswordName("1a2b3c4d", "  "))
+    }
 }

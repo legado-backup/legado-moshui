@@ -40,7 +40,7 @@ class BookSourceImportTest {
         }
         override suspend fun getAllIds() = store.values.filter { !it.deleted }.map { it.id }
         override suspend fun getAllIdsIncludingDeleted() = store.keys.toList()
-        override suspend fun setEnabled(id: String, enabled: Boolean) {}
+        override suspend fun setEnabled(id: String, enabled: Boolean, now: Long) {}
         // 软删除：打标记而不是移除 —— 墓碑得留着，否则 WebDAV 同步会把删掉的源拉回来
         override suspend fun softDeleteById(id: String, now: Long) {
             store[id]?.let { store[id] = it.copy(deleted = true, updatedAt = now) }
@@ -48,8 +48,8 @@ class BookSourceImportTest {
         override suspend fun softDeleteByIds(ids: List<String>, now: Long) {
             ids.forEach { id -> store[id]?.let { store[id] = it.copy(deleted = true, updatedAt = now) } }
         }
-        override suspend fun setEnabledForIds(ids: List<String>, enabled: Boolean) {
-            ids.forEach { id -> store[id]?.let { store[id] = it.copy(enabled = enabled) } }
+        override suspend fun setEnabledForIds(ids: List<String>, enabled: Boolean, now: Long) {
+            ids.forEach { id -> store[id]?.let { store[id] = it.copy(enabled = enabled, updatedAt = now) } }
         }
 
         override suspend fun saveCheck(
@@ -63,12 +63,12 @@ class BookSourceImportTest {
             }
         }
 
-        override suspend fun setSortOrder(id: String, sortOrder: Int) {
-            store[id]?.let { store[id] = it.copy(sortOrder = sortOrder) }
+        override suspend fun setSortOrder(id: String, sortOrder: Int, now: Long) {
+            store[id]?.let { store[id] = it.copy(sortOrder = sortOrder, updatedAt = now) }
         }
 
-        override suspend fun setGroupForIds(ids: List<String>, group: String) {
-            ids.forEach { id -> store[id]?.let { store[id] = it.copy(groupName = group) } }
+        override suspend fun setGroupForIds(ids: List<String>, group: String, now: Long) {
+            ids.forEach { id -> store[id]?.let { store[id] = it.copy(groupName = group, updatedAt = now) } }
         }
 
         override suspend fun minSortOrder() = store.values.minOfOrNull { it.sortOrder }

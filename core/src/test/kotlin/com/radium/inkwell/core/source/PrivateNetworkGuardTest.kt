@@ -1,6 +1,10 @@
 package com.radium.inkwell.core.source
 
 import okhttp3.Dns
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import java.net.InetAddress
 import java.net.UnknownHostException
 import kotlin.test.Test
@@ -75,5 +79,56 @@ class PrivateNetworkGuardTest {
     @Test
     fun `放行开关能整体关掉拦截 —— 测试跑在 127001 上要靠它`() {
         assertEquals(1, guard("127.0.0.1", allowPrivate = true).lookup("localhost").size)
+    }
+
+    // ---- 以下走真实的 OkHttp 连接：OkHttp 对 IP 字面量根本不调 Dns，光测 Dns 类看不出这条缝 ----
+
+    private fun withServer(block: (MockWebServer) -> Unit) {
+        val server = MockWebServer()
+        // 钉在 127.0.0.1：默认按 localhost 绑，有的机器会落到 ::1 上，下面写死的 IPv4 地址就连不上了
+        server.start(InetAddress.getByName("127.0.0.1"), 0)
+        try {
+            block(server)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    private fun OkHttpClient.get(url: String) = newCall(Request.Builder().url(url).build()).execute().use { it.code }
+
+    @Test
+    fun `IP 字面量的内网地址被拦，且一个请求都没发到服务端`() = withServer { server ->
+        server.enqueue(MockResponse().setBody("secret"))
+        val client = OkHttpClient.Builder().guardPrivateNetwork().build()
+        assertFailsWith<UnknownHostException> { client.get("http://127.0.0.1:${server.port}/") }
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `单整数写法的 IPv4 同样被拦`() = withServer { server ->
+        server.enqueue(MockResponse().setBody("secret"))
+        val client = OkHttpClient.Builder().guardPrivateNetwork().build()
+        // 2130706433 = 127.0.0.1：OkHttp 当 IP 直连，判定必须与它一致
+        assertFailsWith<UnknownHostException> { client.get("http://2130706433:${server.port}/") }
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `网络层按真正连上的 IP 拦 —— 域名解析绕开了 Dns 拦截也挡得住`() = withServer { server ->
+        server.enqueue(MockResponse().setBody("secret"))
+        // 模拟「Dns 层被绕过」：解析器直接给内网地址，只靠网络拦截器兜底（重定向的每一跳走的也是这里）
+        val client = OkHttpClient.Builder()
+            .dns(fakeDns("127.0.0.1"))
+            .addNetworkInterceptor(PrivateNetworkGuardInterceptor())
+            .build()
+        assertFailsWith<UnknownHostException> { client.get("http://public.example:${server.port}/") }
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `放行开关下内网照常可达`() = withServer { server ->
+        server.enqueue(MockResponse().setBody("ok"))
+        val client = OkHttpClient.Builder().guardPrivateNetwork(allowPrivate = true).build()
+        assertEquals(200, client.get("http://127.0.0.1:${server.port}/"))
     }
 }

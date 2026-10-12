@@ -285,6 +285,7 @@ fun PageFlipContainer(
                     var last = down
                     var dragDir: FlipDirection? = null
                     var following = false
+                    var cancelled = false
                     // 快甩时位移经常整段落在抬手那一帧。必须先判 slop 再看 pressed ——
                     // 先因 UP 跳出的话，offset 几乎是 0，松手当回弹，中间还会被当成开菜单。
                     // 也不走 horizontalDrag：它不把 UP 交给回调，抬手位移和速度都会丢；
@@ -293,6 +294,13 @@ fun PageFlipContainer(
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            // 系统收走手势（边缘侧滑返回、下拉通知栏、弹窗抢焦点）时，Compose 把 ACTION_CANCEL
+                            // 合成为一次「已消费的抬手」。只看 pressed 会当成真松手：没过 slop 判成点按 →
+                            // 翻页或开菜单，过了 slop 按松手速度提交翻页。真抬手到这里还没人消费过。
+                            if (!change.pressed && change.isConsumed) {
+                                cancelled = true
+                                break
+                            }
                             tracker.addPosition(change.uptimeMillis, change.position)
                             last = change
                             val dx = change.position.x - down.position.x
@@ -382,6 +390,11 @@ fun PageFlipContainer(
                             resetFlipState()
                         }
                         throw e
+                    }
+                    if (cancelled) {
+                        // 跟手到一半被收走：弹回当前页，不提交
+                        if (following) launchSettle(commit = false)
+                        return@awaitEachGesture
                     }
                     if (dragDir == null) {
                         val dx = last.position.x - down.position.x

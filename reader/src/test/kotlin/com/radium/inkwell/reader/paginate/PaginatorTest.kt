@@ -63,6 +63,19 @@ class PaginatorTest {
     }
 
     @Test
+    fun `标题上间距在章首页生效并挤占正文行数`() {
+        // 上间距 80px = 2 行：标题 1 行 + 正文最多 7 行（400 - 80 - 40 = 280）
+        val content = ChapterContent(listOf(ContentElement.Paragraph(cjk(150)))) // 10 行
+        val result = paginator.paginate(0, "第一章", content, spec().copy(titleTopSpacingPx = 80f))
+        val items = result.chapter.pages[0].items
+        val title = items[0] as PageItem.TextSlice
+        val body = items[1] as PageItem.TextSlice
+        assertEquals(80f, title.yTopInPage)
+        assertEquals(0..6, body.lineRange)
+        assertEquals(2, result.chapter.pages.size)
+    }
+
+    @Test
     fun `heading keeps with next - pushed when fewer than two body lines fit below it`() {
         // 8 行正文占 320px，剩 80px：小标题 1 行（行高 40*1.15=46）放得下，但它下面只剩 34px，
         // 连一行正文都塞不进 → 标题整体推到第二页，与正文同页

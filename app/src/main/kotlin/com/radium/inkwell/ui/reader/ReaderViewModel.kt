@@ -40,10 +40,12 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -253,6 +255,11 @@ class ReaderViewModel(
     private var book: BookEntity? = null
     private var source: ReaderBookSource? = null
     private var position = ReadPosition(0, 0)
+    /**
+     * [loadSession] 是否走完。为 false 时 [source] 可能是 null、是换源前已关闭的旧源、或是零章的源，
+     * 都不能拿来重排 —— [retry] 据此决定从进书重来还是只重排当前章。
+     */
+    private var sessionReady = false
 
     // 排版环境（视口就绪后由 UI 注入）
     private var facade: TextMeasureFacade? = null
@@ -302,8 +309,9 @@ class ReaderViewModel(
 
     private suspend fun loadSession() {
         try {
+            sessionReady = false
             (source as? AutoCloseable)?.close()
-            val b = bookRepo.getBook(bookId) ?: error("书籍不存在")
+            var b = bookRepo.getBook(bookId) ?: error("书籍不存在")
             book = b
             // 打开即已知晓：书架上那个"有 N 章新的"红点该灭了
             if (b.newChapterCount > 0) bookRepo.clearNewChapters(bookId)
@@ -324,9 +332,19 @@ class ReaderViewModel(
                 currentSourceName = rule.name
                 // WebDAV 同步下来的网络书只有书行、没有目录行（目录不进备份）。此时不补抓的话
                 // 章节数为 0，ensurePaginated 静默返回 null，页面永远转圈。先拉一次目录落库。
-                if (chapters.isEmpty()) {
-                    netBookRepo.refreshToc(b, rule).getOrThrow()
-                    chapters = chapterDao.getByBook(bookId)
+                // 进度章号超出本地目录也补抓：另一台设备追更后读到了新章，同步来的是新进度，
+                // 本机目录却还是旧的。这一支抓不到不致命（下面会夹取到末章），所以不 throw。
+                if (chapters.isEmpty() || b.readChapterIndex >= chapters.size) {
+                    val refreshed = netBookRepo.refreshToc(b, rule)
+                    if (chapters.isEmpty()) refreshed.getOrThrow()
+                    if (refreshed.isSuccess) {
+                        chapters = chapterDao.getByBook(bookId)
+                        // 追更按新目录对齐了进度、累加了红点：以库里最新行为准
+                        b = bookRepo.getBook(bookId) ?: b
+                        book = b
+                        position = ReadPosition(b.readChapterIndex, b.readCharOffset)
+                        if (b.newChapterCount > 0) bookRepo.clearNewChapters(bookId)
+                    }
                 }
                 NetReaderBookSource(bookId, chapters, rule, engine, contentCache, chapterDao)
             } else {
@@ -343,6 +361,11 @@ class ReaderViewModel(
                     else "这本书解析不出任何章节，可能文件已损坏或格式不支持"
                 )
             }
+            // 补抓之后仍可能越界（离线抓不到目录、本地书文件换成了更短的版本）。越界时
+            // ensurePaginated 静默返回 null，报「第 N 章读不出来」，重试还是同一个位置 —— 死路。
+            if (position.chapterIndex !in 0 until src.chapterCount) {
+                position = ReadPosition(position.chapterIndex.coerceIn(0, src.chapterCount - 1), 0)
+            }
             _state.value = _state.value.copy(
                 bookTitle = b.title,
                 coverPath = b.coverPath,
@@ -354,6 +377,7 @@ class ReaderViewModel(
                 inShelf = b.inShelf && !b.deleted,
                 error = null,
             )
+            sessionReady = true
             // 网络书：首章加载别等清理。进度之前且超龄的正文缓存顺手清掉，目录 isCached 一并 sync。
             if (b.type == BookType.NET) {
                 viewModelScope.launch(Dispatchers.IO) {
@@ -551,8 +575,14 @@ class ReaderViewModel(
     fun retry() {
         viewModelScope.launch {
             // 手动重试 = 用户想再给一次机会（可能网络恢复了）；自动换源的额度跟着复位
-        autoChangeUsed = false
-        _state.value = _state.value.copy(error = null, loading = true)
+            autoChangeUsed = false
+            _state.value = _state.value.copy(error = null, loading = true)
+            // 进书那一步就失败了（书源被删、目录拉不到、本地文件丢失）：只重排当前章会在
+            // ensurePaginated 的守卫上静默返回，兜底报错又要 source 非空 —— 永远转圈、没有出口。
+            if (!sessionReady) {
+                loadSession()
+                return@launch
+            }
             engineMutex.withLock {
                 paginated.clear()
                 showPosition(position)
@@ -1030,6 +1060,7 @@ class ReaderViewModel(
     /** 定位到指定位置：必要时加载+分页该章，并预取相邻章 */
     private suspend fun showPosition(target: ReadPosition) {
         // 这条永远是"用户在等的那一章"（进书、翻章、跳目录、重试都走这里），预取不走这里
+        val src = source
         val result = ensurePaginated(
             target.chapterIndex,
             userFacing = true,
@@ -1040,7 +1071,10 @@ class ReaderViewModel(
             // 随后会再来一次，这里报错只会闪一下假错误。
             // 但环境已就绪却仍拿不到结果（如目录为空导致章号越界），就是真读不出来：
             // 必须让 loading 落地，否则又是一个"永远转圈且没有出口"。
-            if (source != null && facade != null && spec != null && _state.value.error == null) {
+            // 加载期间换了源也不报：ensurePaginated 是有意丢掉旧源结果，新会话随后会自己再定位一次。
+            if (src != null && source === src && facade != null && spec != null &&
+                _state.value.error == null
+            ) {
                 Log.w(TAG, "第 ${target.chapterIndex} 章取不到分页结果，且排版环境已就绪")
                 _state.value = _state.value.copy(
                     loading = false,
@@ -1386,8 +1420,8 @@ class ReaderViewModel(
                         chapterIndex, title, content, spec,
                         notifyAfterChar = notifyAfterChar,
                         onPartial = { partial ->
-                            // 排到一半视口/字号已经换了：这份是按旧 spec 排的，别塞进缓存
-                            if (spec != this@ReaderViewModel.spec) return@paginate
+                            // 排到一半视口/字号已经换了：这份是按旧 spec 排的，别塞进缓存；源换了同理
+                            if (spec != this@ReaderViewModel.spec || src !== source) return@paginate
                             paginated[chapterIndex] = partial
                             if (userFacing) {
                                 val pageIdx = if (notifyAfterChar == Int.MAX_VALUE) {
@@ -1406,6 +1440,9 @@ class ReaderViewModel(
             // 裁字或留大片空白，直到再换一次设置才好。丢掉，让调用方按新 spec 重排。
             // 邻章预取几乎必踩：网络书拉下一章要一两秒，用户这时点 A+ 是很自然的事。
             if (spec != this.spec) return null
+            // 同理：拉正文期间换了源（loadSession 已清过分页缓存），这份是**旧源**的正文。
+            // 写回去，下一章翻过去看到的还是旧源的内容 —— 而换源多半就是嫌它的正文不对。
+            if (src !== source) return null
             paginated[chapterIndex] = result
             // 目录跳章时 position 还停在旧章：若只按旧章号裁窗口，刚分好页的目标章会被
             // 当场剔除，随后 showPage 取不到分页结果直接 return，页面永远停在转圈。
@@ -1426,8 +1463,15 @@ class ReaderViewModel(
         }
     }
 
+    /**
+     * 邻章预载的父 Job（挂在 viewModelScope 下）。每次出页都会发一轮，不能「新一轮取消旧一轮」——
+     * 网络书拉一章要一两秒，连翻时就永远排不完。只在换源时由 [stopPrefetch] 一并掐掉并等停。
+     */
+    private val neighborJobs = SupervisorJob(viewModelScope.coroutineContext[Job])
+    private val neighborScope = CoroutineScope(viewModelScope.coroutineContext + neighborJobs)
+
     private fun preloadNeighbors(center: Int) {
-        viewModelScope.launch {
+        neighborScope.launch {
             // 邻章排版不占 engineMutex：用户翻章的 IO 不该排队等上一章量字。
             // 测量仍走 measureMutex（facade 不能并发）。
             ensurePaginated(center + 1)
@@ -1494,6 +1538,8 @@ class ReaderViewModel(
     private suspend fun stopPrefetch() {
         prefetchJob?.cancelAndJoin()
         prefetchJob = null
+        // 邻章预载同理：它也走 loadChapter，换源后回来会给新目录的同序号章节打上「已缓存」
+        neighborJobs.children.toList().forEach { it.cancelAndJoin() }
     }
 
     /** 只保留 center±1 的分页结果（测量结果持有 TextLayoutResult，较重） */

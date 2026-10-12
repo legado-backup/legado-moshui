@@ -9,7 +9,7 @@ import kotlin.test.assertEquals
 /**
  * `@textNodes` 正文规则的**完整链路**，与 BookSourceEngine.getContent 一致：
  *
- *     LegadoSelector.strings(rule) → Jsoup.parseBodyFragment → HtmlToElements.convert
+ *     LegadoSelector.strings(rule) → 换行拼接 → asContentHtml → Jsoup.parseBodyFragment → HtmlToElements.convert
  *
  * 单独测 HtmlToElements 是不够的 —— 「若雨中文」（id.BookText@textNodes）那次就是：
  * HtmlToElements 的单测全绿，实际却毫无变化，因为段落结构早在 @textNodes 那一步就被
@@ -18,15 +18,20 @@ import kotlin.test.assertEquals
  */
 class TextNodesPipelineTest {
 
-    private fun paragraphs(html: String): List<String> {
+    private fun paragraphs(html: String, rule: String = "id.BookText@textNodes"): List<String> {
         val root = Jsoup.parse(html).body()
-        // getContent 会把规则结果当 HTML 再解析一次，这里如实复现
-        val ruleResult = LegadoSelector.strings(root, "id.BookText@textNodes").joinToString("")
-        val body = Jsoup.parseBodyFragment(ruleResult).body()
+        // getContent 会把规则结果当 HTML 再解析一次，这里如实复现（多条结果按 evalToString 的换行拼接）
+        val ruleResult = LegadoSelector.strings(root, rule).joinToString("\n")
+        val body = Jsoup.parseBodyFragment(asContentHtml(ruleResult)).body()
         return HtmlToElements().convert(body)
             .filterIsInstance<ContentElement.Paragraph>()
             .map { it.text }
     }
+
+    private fun plainParagraphs(ruleResult: String): List<String> =
+        HtmlToElements().convert(Jsoup.parseBodyFragment(asContentHtml(ruleResult)).body())
+            .filterIsInstance<ContentElement.Paragraph>()
+            .map { it.text }
 
     private val expected =
         listOf("一拳碰撞，火星四溅！", "火神闷哼一声，倒飞了出去。", "他的嘴角，溢出鲜血。")
@@ -64,6 +69,58 @@ class TextNodesPipelineTest {
                     "　　他的嘴角，溢出鲜血。\n" +
                     "</div>",
             ),
+        )
+    }
+
+    /** `<br>` 分段但段首**没有**缩进（缩进靠 CSS）：从前整章挤成一段 */
+    @Test
+    fun `br 分段无缩进`() {
+        assertEquals(
+            expected,
+            paragraphs(
+                "<div id=\"BookText\">" +
+                    "一拳碰撞，火星四溅！<br />" +
+                    "火神闷哼一声，倒飞了出去。<br />" +
+                    "他的嘴角，溢出鲜血。" +
+                    "</div>",
+            ),
+        )
+    }
+
+    /** 多元素 `@text`：每个 `<p>` 一段，text() 已剥掉缩进，只剩求值器拼进去的换行 */
+    @Test
+    fun `多元素 text 每个元素一段`() {
+        assertEquals(
+            expected,
+            paragraphs(
+                "<div id=\"BookText\"><p>一拳碰撞，火星四溅！</p><p>火神闷哼一声，倒飞了出去。</p>" +
+                    "<p>他的嘴角，溢出鲜血。</p></div>",
+                rule = "id.BookText@tag.p@text",
+            ),
+        )
+    }
+
+    /** JSON 接口 / JS 解密出的纯文本正文：换行就是段界，`\r\n` 一样认 */
+    @Test
+    fun `纯文本正文按换行分段`() {
+        assertEquals(expected, plainParagraphs("一拳碰撞，火星四溅！\r\n火神闷哼一声，倒飞了出去。\n\n他的嘴角，溢出鲜血。"))
+    }
+
+    /** 只有行内标签（广告包裹）不算 HTML 结构，换行照样分段 */
+    @Test
+    fun `只有行内标签仍按换行分段`() {
+        assertEquals(
+            expected,
+            plainParagraphs("一拳碰撞，火星四溅！\n<span>火神闷哼一声，倒飞了出去。</span>\n他的嘴角，溢出鲜血。"),
+        )
+    }
+
+    /** 真 HTML 里为可读性折的行不是段界：有块级标签时保持原来的判定 */
+    @Test
+    fun `HTML 源码折行不分段`() {
+        assertEquals(
+            listOf("一拳碰撞， 火星四溅！"),
+            plainParagraphs("<p>一拳碰撞，\n  火星四溅！</p>"),
         )
     }
 

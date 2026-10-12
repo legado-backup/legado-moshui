@@ -148,7 +148,7 @@ class BookSourceRepository(
         return ImportReport(added, updated, skipped, failed)
     }
 
-    suspend fun setEnabled(id: String, enabled: Boolean) = dao.setEnabled(id, enabled)
+    suspend fun setEnabled(id: String, enabled: Boolean) = dao.setEnabled(id, enabled, System.currentTimeMillis())
 
     suspend fun delete(id: String) {
         dao.softDeleteById(id, System.currentTimeMillis())
@@ -164,7 +164,7 @@ class BookSourceRepository(
     }
 
     suspend fun setEnabledAll(ids: Collection<String>, enabled: Boolean) {
-        if (ids.isNotEmpty()) dao.setEnabledForIds(ids.toList(), enabled)
+        if (ids.isNotEmpty()) dao.setEnabledForIds(ids.toList(), enabled, System.currentTimeMillis())
     }
 
     suspend fun getRule(id: String): BookSourceRule? =
@@ -223,16 +223,18 @@ class BookSourceRepository(
      *  从前用 order-- 递减，会把多选置顶的顺序整体倒过来 */
     suspend fun moveToTop(ids: Collection<String>) {
         var order = (dao.minSortOrder() ?: 0) - ids.size
-        ids.forEach { dao.setSortOrder(it, order++) }
+        val now = System.currentTimeMillis()
+        ids.forEach { dao.setSortOrder(it, order++, now) }
     }
 
     suspend fun moveToBottom(ids: Collection<String>) {
         var order = (dao.maxSortOrder() ?: 0) + 1
-        ids.forEach { dao.setSortOrder(it, order++) }
+        val now = System.currentTimeMillis()
+        ids.forEach { dao.setSortOrder(it, order++, now) }
     }
 
     suspend fun setGroup(ids: Collection<String>, group: String) {
-        dao.setGroupForIds(ids.toList(), group.trim())
+        dao.setGroupForIds(ids.toList(), group.trim(), System.currentTimeMillis())
     }
 
     /** 导出为 Legado 原生格式（库里存的就是原生 JSON） */

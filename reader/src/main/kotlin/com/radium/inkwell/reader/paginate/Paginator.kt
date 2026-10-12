@@ -79,7 +79,7 @@ class Paginator(private val measurer: TextMeasureFacade) {
                     if (element.text.isNotBlank()) {
                         val mp = measurer.measureParagraph(element.text, titleStyle, spec.contentWidthPx)
                         measured[idx] = mp
-                        cursor.addGap(spec.titleTopSpacingPx)
+                        cursor.addLeadingSpace(spec.titleTopSpacingPx)
                         placeParagraph(idx, element.text.length, mp, spec, cursor, charOffset,
                             isTitle = true, onSeal = ::seal, currentCursor = { cursor })
                         cursor.addGap(spec.paragraphSpacingPx * 1.5f)
@@ -282,6 +282,15 @@ internal class PageCursor(private val spec: LayoutSpec) {
 
     fun addGap(gap: Float) {
         if (items.isNotEmpty()) usedHeight += gap
+    }
+
+    /**
+     * 页首留白：与 [addGap] 相反，空页也照加。章节标题永远是章首页的第一个元素，
+     * 从前用 addGap 加标题上间距，判空直接跳过 ——「标题上间距」那档设置调到哪都一样。
+     * 不进 [items]，所以 [isEmpty] 仍为 true：keep-with-next 不会因为这段空白把标题推下页。
+     */
+    fun addLeadingSpace(space: Float) {
+        usedHeight += space
     }
 
     fun noteCharEnd(offset: Int) {

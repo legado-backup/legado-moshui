@@ -1,8 +1,27 @@
 package com.radium.inkwell.core.source
 
 import okhttp3.Dns
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import okhttp3.Response
 import java.net.InetAddress
+import java.net.Proxy
 import java.net.UnknownHostException
+
+/**
+ * 给抓取第三方地址的客户端装上完整的内网拦截：DNS 层 [PrivateNetworkGuardDns] 加
+ * [PrivateNetworkGuardInterceptor]。只装 Dns 是不够的，原因见后者。
+ * [allowPrivate] 只该在测试里开（MockWebServer 跑在 127.0.0.1 上）。
+ */
+fun OkHttpClient.Builder.guardPrivateNetwork(allowPrivate: Boolean = false): OkHttpClient.Builder {
+    dns(PrivateNetworkGuardDns(allowPrivate = allowPrivate))
+    if (!allowPrivate) {
+        val guard = PrivateNetworkGuardInterceptor()
+        addInterceptor(guard)
+        addNetworkInterceptor(guard)
+    }
+    return this
+}
 
 /**
  * 把书源挡在内网之外（SSRF 防护）。
@@ -38,6 +57,52 @@ class PrivateNetworkGuardDns(
         return public
     }
 }
+
+/**
+ * [PrivateNetworkGuardDns] 的补位：OkHttp 遇到 IP 字面量的 host **根本不调 Dns.lookup**
+ * （RouteSelector 里 `canParseAsIpAddress` 成立就直接 `InetAddress.getByName`）。于是书源直接写
+ * `http://192.168.1.1/`、`http://2130706433/`（=127.0.0.1），或公网地址 302 到内网 IP，
+ * 全都从 DNS 层旁边绕过去了 —— 而那正是这套拦截最该挡住的目标。
+ *
+ * 同一个实例挂两处：
+ * - **应用拦截器**：首跳还没建连，按 URL 里的 IP 字面量拦，一个包都不发；
+ * - **网络拦截器**：每一跳（含重定向）都会经过，此时连接已建好，查**真正连上的那个 IP**。
+ *   请求还没写出去，内网服务收不到任何内容。
+ *
+ * 走代理时连的是代理而不是目标，不能拿代理地址判（系统代理设在本机 127.0.0.1 很常见），
+ * 只看目标 host 是不是内网 IP 字面量。
+ */
+class PrivateNetworkGuardInterceptor : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val route = chain.connection()?.route()
+        val target = if (route != null && route.proxy.type() == Proxy.Type.DIRECT) {
+            route.socketAddress.address
+        } else {
+            ipLiteralOf(request.url.host)
+        }
+        if (target != null && target.isPrivate()) {
+            throw UnknownHostException("拒绝访问内网地址: ${request.url.host}")
+        }
+        return chain.proceed(request)
+    }
+}
+
+/**
+ * host 是 IP 字面量时返回对应地址，否则 null。判定与 OkHttp 的 `canParseAsIpAddress` 一致
+ * （含冒号的当 IPv6，纯数字和点的当 IPv4 —— 包括 `2130706433` 这种单整数写法），
+ * 否则会出现「OkHttp 当 IP 直连、这里当域名放过」的缝。
+ */
+private fun ipLiteralOf(host: String): InetAddress? {
+    if (!IP_LITERAL.matches(host)) return null
+    return try {
+        InetAddress.getByName(host)
+    } catch (_: UnknownHostException) {
+        null
+    }
+}
+
+private val IP_LITERAL = Regex("([0-9a-fA-F]*:[0-9a-fA-F:.]*)|([\\d.]+)")
 
 /**
  * 是否属于「不该让第三方书源碰」的地址段。

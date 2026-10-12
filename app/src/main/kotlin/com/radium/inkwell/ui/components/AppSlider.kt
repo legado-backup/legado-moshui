@@ -67,14 +67,17 @@ fun AppSlider(
         )
     }
     val interactionSource = remember { MutableInteractionSource() }
+    // material3 1.5.0-alpha28 起，带 thumb/track 槽的无状态重载降成 HIDDEN，只剩有状态版能换形。
+    // 照官方无状态重载的内部写法桥接：按 steps/valueRange 记住 state，每次重组把外部 value 写回去，
+    // 对外签名不变，调用点不用动。
+    val state = remember(steps, valueRange) { SliderState(value, steps, valueRange) }
+    state.value = value
 
     Slider(
-        value = value,
+        state = state,
         onValueChange = onValueChange,
         modifier = modifier,
         enabled = enabled,
-        valueRange = valueRange,
-        steps = steps,
         onValueChangeFinished = onValueChangeFinished,
         colors = colors,
         interactionSource = interactionSource,
@@ -92,9 +95,9 @@ fun AppSlider(
                 Box(Modifier.size(Dimens.sliderThumb).background(color, CircleShape))
             }
         },
-        track = { state ->
+        track = { sliderState ->
             CompactTrack(
-                state = state,
+                state = sliderState,
                 activeColor = if (enabled) colors.activeTrackColor else colors.disabledActiveTrackColor,
                 inactiveColor = if (enabled) {
                     colors.inactiveTrackColor

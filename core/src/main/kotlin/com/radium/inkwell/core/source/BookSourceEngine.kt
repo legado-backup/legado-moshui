@@ -191,11 +191,14 @@ class BookSourceEngine(
         }
         val fetched = fetchPage(source, url, "detail", render)
         val js = jsContextOf(source, bookUrl = url)
-        val ctx = pageContext(fetched, varsOf(source), js)
-        // Legado 先跑 init（常见 @put:{n,a,k}），后面字段才能 @get:{n}
-        if (!info.init.isNullOrBlank()) {
-            evalField("detail", "init", info.init, ctx)
-        }
+        val pageCtx = pageContext(fetched, varsOf(source), js)
+        // Legado 先跑 init，再在它**选中的那块内容**上求后面的字段（setContent(getElement(init))）。
+        // 常见两种写法：@put:{n,a,k} 存变量给后面 @get:{n}；`$.data` / `class.info` 切换求值内容。
+        // 从前只为副作用跑一遍，后一种的 `"init":"$.data"` 配 `"name":"$.book_name"` 会全部取空，
+        // 目录地址回落成 bookUrl，最后报「目录规则未匹配到章节」—— 书打不开。
+        val ctx = info.init?.takeIf { it.isNotBlank() }
+            ?.let { initContentOf(it, pageCtx) }
+            ?: pageCtx
         val title = evalField("detail", "title", info.name, ctx)
         val author = evalField("detail", "author", info.author, ctx)
         js.book.name = title.orEmpty()
@@ -381,7 +384,7 @@ class BookSourceEngine(
             val ctx = pageContext(fetched, varsOf(source), js)
             val html = evalField("content", "content", rule.content, ctx)
             if (html != null) {
-                val body = Jsoup.parseBodyFragment(html, fetched.finalUrl).body()
+                val body = Jsoup.parseBodyFragment(asContentHtml(html), fetched.finalUrl).body()
                 elements += HtmlToElements().convert(body)
             }
             url = rule.nextContentUrl
@@ -644,14 +647,33 @@ class BookSourceEngine(
         return SearchPage(items, hasNextRule || (pageable && items.isNotEmpty()))
     }
 
-    private fun evalList(stage: String, rule: String, ctx: EvalContext): List<EvalContext> =
+    private fun evalList(
+        stage: String,
+        rule: String,
+        ctx: EvalContext,
+        name: String = "list",
+    ): List<EvalContext> =
         try {
             val nodes = evaluator.evalToNodes(LegadoRuleAnalyzer.analyze(rule), ctx)
-            trace?.onRule(RuleTrace(stage, "list", rule, "${nodes.size} 个节点"))
+            trace?.onRule(RuleTrace(stage, name, rule, "${nodes.size} 个节点"))
             nodes
         } catch (e: Exception) {
-            trace?.onRule(RuleTrace(stage, "list", rule, null, e.message))
+            trace?.onRule(RuleTrace(stage, name, rule, null, e.message))
             throw e
+        }
+
+    /**
+     * 详情 init 选出的内容；纯 `@put`（没有选出东西）或选出的只是个标量时返回 null，保持整页。
+     * 标量不切：脚本 init 常顺手返回个值（如 `java.put` 的返回值），在一个字符串上什么字段都取不出来。
+     */
+    private fun initContentOf(rule: String, ctx: EvalContext): EvalContext? =
+        evalList("detail", rule, ctx, name = "init").firstOrNull()?.takeIf { node ->
+            val json = node.json
+            node.element != null || when (json) {
+                null -> false
+                is String -> json.trimStart().let { it.startsWith("{") || it.startsWith("[") }
+                else -> true
+            }
         }
 
     /**
@@ -750,6 +772,24 @@ internal fun parseReplaceRegex(raw: String?): List<PurifyRule> {
         if (pattern.isBlank()) null else PurifyRule(pattern = pattern, replacement = replacement, isRegex = true)
     }
 }
+
+/**
+ * 正文规则的结果不一定是 HTML：多元素 `@text`（每个元素一段，求值器用 `\n` 拼起来）、`@textNodes`、
+ * JSON 接口的正文、JS 解密出的纯文本，段落结构全靠换行承载。而 [HtmlToElements] 只把
+ * 「换行 + 全角缩进」当段界 —— 对 HTML 这是对的（源码里为可读性折的行不是段落），但对上面这些
+ * 结果，段首没有缩进就会整章挤成一段。Legado 按换行分段，同一个书源在它那里是正常的。
+ *
+ * 所以：结果里没有任何块级标签或 `<br>` 时，它的换行就是段落边界，换成 `<br>` 再交给转换器。
+ * 只有行内标签（`<span>`/`<font>` 之类的广告包裹）不算 HTML 结构，照样按换行分段。
+ */
+internal fun asContentHtml(raw: String): String =
+    if (CONTENT_BLOCK_TAG.containsMatchIn(raw)) raw else raw.replace(CONTENT_LINE_BREAK, "<br>")
+
+private val CONTENT_BLOCK_TAG = Regex(
+    "<(?:br|p|div|h[1-6]|li|hr|blockquote|section|article|dd|dt|td|tr|table|pre)\\b",
+    RegexOption.IGNORE_CASE,
+)
+private val CONTENT_LINE_BREAK = Regex("\\r\\n?|\\n")
 
 /**
  * 把 POST 表单模板里尚未带管道的 `{{key}}` / `{{keyword}}` 改成 `{{key|encode}}`。

@@ -49,11 +49,16 @@ interface BookDao {
     @Query("SELECT * FROM book WHERE deleted = 0 AND inShelf = 1")
     suspend fun getAllVisible(): List<BookEntity>
 
-    @Query("UPDATE book SET groupName = :group WHERE id = :id")
-    suspend fun setGroup(id: String, group: String)
+    /**
+     * 分组、隐藏都是要跨设备同步的元数据，合并按 updatedAt 做 LWW —— 必须同时盖时间戳。
+     * 不盖的话改动永远同步不出去，别的设备一追更（刷新了 updatedAt）还会把它改回来：
+     * 隐藏的书自己冒回书架、分组掉回原样。
+     */
+    @Query("UPDATE book SET groupName = :group, updatedAt = :now WHERE id = :id")
+    suspend fun setGroup(id: String, group: String, now: Long)
 
-    @Query("UPDATE book SET hidden = :hidden WHERE id = :id")
-    suspend fun setHidden(id: String, hidden: Boolean)
+    @Query("UPDATE book SET hidden = :hidden, updatedAt = :now WHERE id = :id")
+    suspend fun setHidden(id: String, hidden: Boolean, now: Long)
 
     /** 打开这本书 = 你已经知道它更新了，红点清零 */
     @Query("UPDATE book SET newChapterCount = 0 WHERE id = :id")

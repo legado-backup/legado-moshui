@@ -278,7 +278,10 @@ class BookPreviewViewModel(
             val bookId = bookRepo.shelfBookIdByKey(s.title, s.author)
                 ?: persistBook(inShelf = false)
                 ?: return@launch
-            if (chapterIndex >= 0) netBookRepo.setReadPosition(bookId, chapterIndex)
+            if (chapterIndex >= 0) {
+                val title = s.chapters.firstOrNull { it.index == chapterIndex }?.title.orEmpty()
+                netBookRepo.setReadPosition(bookId, chapterIndex, title)
+            }
             _openReader.emit(bookId)
         }
     }

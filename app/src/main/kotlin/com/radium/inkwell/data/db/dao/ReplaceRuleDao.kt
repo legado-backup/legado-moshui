@@ -40,8 +40,9 @@ interface ReplaceRuleDao {
     @Query("UPDATE replace_rule SET deleted = 1, updatedAt = :now WHERE bookId = :bookId AND bookId != '' AND deleted = 0")
     suspend fun softDeleteByBook(bookId: String, now: Long)
 
-    @Query("UPDATE replace_rule SET enabled = :enabled WHERE id = :id")
-    suspend fun setEnabled(id: String, enabled: Boolean)
+    /** 启停同样要盖 updatedAt：合并按它做 LWW，不盖的话开关同步不出去、还会被旧副本改回来 */
+    @Query("UPDATE replace_rule SET enabled = :enabled, updatedAt = :now WHERE id = :id")
+    suspend fun setEnabled(id: String, enabled: Boolean, now: Long)
 
     @Query("SELECT COALESCE(MAX(sortOrder), 0) FROM replace_rule WHERE deleted = 0")
     suspend fun maxSortOrder(): Int

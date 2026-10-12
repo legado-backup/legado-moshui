@@ -1,6 +1,8 @@
 package com.radium.inkwell.data.repo
 
+import android.os.Build
 import com.radium.inkwell.core.webdav.WebDavClient
+import com.radium.inkwell.data.net.OfficialAppPassword
 import com.radium.inkwell.data.net.OfficialAuthData
 import com.radium.inkwell.data.net.OfficialWebDav
 import com.radium.inkwell.data.net.OfficialWebDavClient
@@ -104,17 +106,21 @@ class OfficialWebDavRepository(
     }
 
     /**
-     * 优先走服务端 `replace`（同名旧码直接作废）。旧版 API 不认这个字段时，
-     * 换机几次就会撞上 10 条上限 —— 那时改成客户端先删同名再发。
+     * 优先走服务端 `replace`（同名旧码直接作废）。名字按设备区分，所以作废的只是本机上一次的码，
+     * 别的设备不受影响。旧版 API 不认这个字段时，重登几次就会撞上 10 条上限 —— 那时改成客户端
+     * 先删同名再发；0.3.7 及更早那个全设备共用的旧名字也一并清掉（从前撞上限时本来就会清它）。
      */
-    private suspend fun issueAppPassword(access: String) = try {
-        api.createAppPassword(access, OfficialWebDav.APP_PASSWORD_NAME, replace = true)
-    } catch (e: OfficialWebDavException) {
-        if (e.errorCode != "limit") throw e
-        val existing = api.listAppPasswords(access).items
-            .filter { it.name == OfficialWebDav.APP_PASSWORD_NAME }
-        existing.forEach { api.deleteAppPassword(access, it.id) }
-        api.createAppPassword(access, OfficialWebDav.APP_PASSWORD_NAME, replace = false)
+    private suspend fun issueAppPassword(access: String): OfficialAppPassword {
+        val name = OfficialWebDav.appPasswordName(prefs.deviceId(), Build.MODEL)
+        return try {
+            api.createAppPassword(access, name, replace = true)
+        } catch (e: OfficialWebDavException) {
+            if (e.errorCode != "limit") throw e
+            val stale = api.listAppPasswords(access).items
+                .filter { it.name == name || it.name == OfficialWebDav.APP_PASSWORD_NAME }
+            stale.forEach { api.deleteAppPassword(access, it.id) }
+            api.createAppPassword(access, name, replace = false)
+        }
     }
 
     private suspend fun <T> withFreshAccess(block: suspend (String) -> T): T {

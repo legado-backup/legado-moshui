@@ -36,6 +36,8 @@ fun Modifier.menuBodyGesture(
             while (true) {
                 val event = awaitPointerEvent()
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                // 系统收走手势（侧滑返回等）时 Compose 合成的是「已消费的抬手」，别当成点按/轻甩
+                if (!change.pressed && change.isConsumed) return@awaitEachGesture
                 tracker.addPosition(change.uptimeMillis, change.position)
                 last = change
                 val dx = change.position.x - down.position.x

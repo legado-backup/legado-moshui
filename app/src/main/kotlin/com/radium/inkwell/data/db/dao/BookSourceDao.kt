@@ -52,8 +52,12 @@ interface BookSourceDao {
     @Query("SELECT id FROM book_source")
     suspend fun getAllIdsIncludingDeleted(): List<String>
 
-    @Query("UPDATE book_source SET enabled = :enabled WHERE id = :id")
-    suspend fun setEnabled(id: String, enabled: Boolean)
+    /**
+     * 启停、排序、分组都会跨设备同步，合并按 updatedAt 做 LWW —— 改它们必须同时盖时间戳，
+     * 否则改动同步不出去，还会被别的设备上那份旧副本反向覆盖回来。
+     */
+    @Query("UPDATE book_source SET enabled = :enabled, updatedAt = :now WHERE id = :id")
+    suspend fun setEnabled(id: String, enabled: Boolean, now: Long)
 
     /**
      * 软删除：打标记而不是删行，并**同时更新 updatedAt** —— 合并靠它做 LWW 裁决，
@@ -65,8 +69,8 @@ interface BookSourceDao {
     @Query("UPDATE book_source SET deleted = 1, updatedAt = :now WHERE id IN (:ids)")
     suspend fun softDeleteByIds(ids: List<String>, now: Long)
 
-    @Query("UPDATE book_source SET enabled = :enabled WHERE id IN (:ids)")
-    suspend fun setEnabledForIds(ids: List<String>, enabled: Boolean)
+    @Query("UPDATE book_source SET enabled = :enabled, updatedAt = :now WHERE id IN (:ids)")
+    suspend fun setEnabledForIds(ids: List<String>, enabled: Boolean, now: Long)
 
     @Query(
         """
@@ -78,11 +82,11 @@ interface BookSourceDao {
     )
     suspend fun saveCheck(id: String, status: Int, message: String, respondTime: Long, checkedAt: Long)
 
-    @Query("UPDATE book_source SET sortOrder = :sortOrder WHERE id = :id")
-    suspend fun setSortOrder(id: String, sortOrder: Int)
+    @Query("UPDATE book_source SET sortOrder = :sortOrder, updatedAt = :now WHERE id = :id")
+    suspend fun setSortOrder(id: String, sortOrder: Int, now: Long)
 
-    @Query("UPDATE book_source SET groupName = :group WHERE id IN (:ids)")
-    suspend fun setGroupForIds(ids: List<String>, group: String)
+    @Query("UPDATE book_source SET groupName = :group, updatedAt = :now WHERE id IN (:ids)")
+    suspend fun setGroupForIds(ids: List<String>, group: String, now: Long)
 
     @Query("SELECT MIN(sortOrder) FROM book_source WHERE deleted = 0")
     suspend fun minSortOrder(): Int?

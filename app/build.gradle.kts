@@ -9,6 +9,9 @@ plugins {
 android {
     namespace = "com.radium.inkwell"
     compileSdk = 37
+    // Compose 1.13.0-beta01（compose-bom-alpha 2026.10.00）的 AAR 元数据要求按 37.1 编译，
+    // 37.0 在 checkAarMetadata 就挂。只影响编译期可见的 API，targetSdk 与运行行为不变。
+    compileSdkMinor = 1
 
     defaultConfig {
         applicationId = "com.radium.inkwell"

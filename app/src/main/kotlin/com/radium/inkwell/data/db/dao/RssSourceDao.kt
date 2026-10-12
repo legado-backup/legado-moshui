@@ -24,8 +24,9 @@ interface RssSourceDao {
     @Upsert
     suspend fun upsertAll(sources: List<RssSourceEntity>)
 
-    @Query("UPDATE rss_source SET enabled = :enabled WHERE id = :id")
-    suspend fun setEnabled(id: String, enabled: Boolean)
+    /** 启停同样要盖 updatedAt：合并按它做 LWW，不盖的话开关同步不出去、还会被旧副本改回来 */
+    @Query("UPDATE rss_source SET enabled = :enabled, updatedAt = :now WHERE id = :id")
+    suspend fun setEnabled(id: String, enabled: Boolean, now: Long)
 
     /**
      * 软删除：打标记而不是删行，并**同时更新 updatedAt** —— 合并靠它做 LWW 裁决，

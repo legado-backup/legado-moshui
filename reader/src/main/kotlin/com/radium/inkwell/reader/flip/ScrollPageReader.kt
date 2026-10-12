@@ -51,6 +51,11 @@ fun ScrollPageReader(
     val offset = remember { mutableFloatStateOf(0f) }
     var size by remember { mutableStateOf(IntSize.Zero) }
     var pendingFlip by remember { mutableStateOf<FlipDirection?>(null) }
+    // pendingFlip 是否已经交给 onFlip。滚动回调/点按当场就翻了，pendingFlip 只是让换页那帧接上 leftover；
+    // 只有换页当帧算出的「连翻」才要下面的 LaunchedEffect 代发。不分开的话，重组先看到 pendingFlip、
+    // 后看到新页（跨章要等分页，几乎必然）时 effect 会再翻一次 —— 而 ViewModel 读的是已经前进过的页，
+    // 结果是跳过新章第一页，或同一章被重复加载。
+    var pendingDispatched by remember { mutableStateOf(false) }
     val currentLatest = rememberUpdatedState(current)
     val prevLatest = rememberUpdatedState(prev)
     val nextLatest = rememberUpdatedState(next)
@@ -91,12 +96,14 @@ fun ScrollPageReader(
             offset.floatValue = step.drawOffset
             leftover.floatValue = step.leftover
             pendingFlip = step.flip
+            pendingDispatched = false
         }
     }
     val nextReady = next != null
     val prevReady = prev != null
     LaunchedEffect(pageKey, nextReady, prevReady, pendingFlip) {
         val chained = pendingFlip ?: return@LaunchedEffect
+        if (pendingDispatched) return@LaunchedEffect
         if (leftoverChain >= 8) {
             leftover.floatValue = 0f
             pendingFlip = null
@@ -132,6 +139,7 @@ fun ScrollPageReader(
         if (step.flip != null) {
             leftover.floatValue = step.leftover
             pendingFlip = step.flip
+            pendingDispatched = true
             onFlipLatest.value(step.flip)
             return@rememberScrollableState composeDelta
         }
@@ -203,6 +211,7 @@ fun ScrollPageReader(
                     }
                     if (can) {
                         pendingFlip = dir
+                        pendingDispatched = true
                         onFlipLatest.value(dir)
                     }
                 }
