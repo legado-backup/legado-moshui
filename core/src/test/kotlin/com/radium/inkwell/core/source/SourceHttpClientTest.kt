@@ -147,6 +147,19 @@ class SourceHttpClientTest {
         assertEquals("q=测试", req.body.readUtf8())
     }
 
+    /** 没写 Content-Type 的 JSON body 按 JSON 发（与 Legado 一致），而不是当成表单 */
+    @Test
+    fun `post json body without content type is sent as json`() = runBlocking {
+        server.enqueue(MockResponse().setBody("ok"))
+        server.enqueue(MockResponse().setBody("ok"))
+        val c = client()
+        c.fetch(server.url("/api").toString(), method = "POST", body = "{\"key\":\"剑\"}")
+        assertTrue(server.takeRequest().getHeader("Content-Type")!!.startsWith("application/json"))
+        // 表单照旧
+        c.fetch(server.url("/api").toString(), method = "POST", body = "key=剑&page=1")
+        assertTrue(server.takeRequest().getHeader("Content-Type")!!.startsWith("application/x-www-form-urlencoded"))
+    }
+
     @Test
     fun `rate limit spaces out requests`() = runBlocking {
         repeat(3) { server.enqueue(MockResponse().setBody("ok")) }

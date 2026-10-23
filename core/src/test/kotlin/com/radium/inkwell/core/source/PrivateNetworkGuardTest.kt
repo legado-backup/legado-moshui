@@ -10,6 +10,8 @@ import java.net.UnknownHostException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * 书源 SSRF 防护。
@@ -130,5 +132,33 @@ class PrivateNetworkGuardTest {
         server.enqueue(MockResponse().setBody("ok"))
         val client = OkHttpClient.Builder().guardPrivateNetwork(allowPrivate = true).build()
         assertEquals(200, client.get("http://127.0.0.1:${server.port}/"))
+    }
+
+    // ---- 按主机判（WebView 渲染用：拿不到实际连上的 IP，只能事先判）----
+
+    @Test
+    fun `主机判定：内网字面量、localhost 与 local 不解析也拦`() {
+        val noDns = Dns { error("字面量不该走 DNS: $it") }
+        listOf(
+            "127.0.0.1", "192.168.1.1", "10.0.0.8", "[::1]", "::1", "[fe80::1]",
+            "2130706433", "localhost", "router.localhost", "nas.local",
+        ).forEach { assertTrue(isPrivateNetworkHost(it, noDns), it) }
+        assertFalse(isPrivateNetworkHost("8.8.8.8", noDns))
+    }
+
+    @Test
+    fun `主机判定：域名任一解析结果落在内网就拦，解析失败不拦`() {
+        assertTrue(isPrivateNetworkHost("evil.example.com", fakeDns("1.2.3.4", "192.168.0.1")))
+        assertFalse(isPrivateNetworkHost("book.example.com", fakeDns("1.2.3.4")))
+        val nx = Dns { throw UnknownHostException(it) }
+        assertFalse(isPrivateNetworkHost("no-such.example.com", nx))
+    }
+
+    @Test
+    fun `主线程判定只认字面量`() {
+        assertTrue(isPrivateNetworkLiteral("192.168.1.1"))
+        assertTrue(isPrivateNetworkLiteral("localhost"))
+        // 域名不解析就判不了，交给 IO 线程上的那一道
+        assertFalse(isPrivateNetworkLiteral("localtest.me"))
     }
 }

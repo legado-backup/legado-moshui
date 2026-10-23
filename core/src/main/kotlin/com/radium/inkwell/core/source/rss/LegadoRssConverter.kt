@@ -16,7 +16,8 @@ import kotlinx.serialization.json.jsonObject
  */
 object LegadoRssConverter {
 
-    const val VERSION = 1
+    /** v2：sortUrl 与 Legado 一样按 `&&` 拆分（v1 只按换行）。目前只写入、尚无按它重转的逻辑 */
+    const val VERSION = 2
 
     data class Converted(val rule: RssSourceRule, val sourceJson: String)
     data class Skipped(val name: String, val url: String, val reason: String)
@@ -80,10 +81,14 @@ object LegadoRssConverter {
         )
     }
 
-    /** legado 的 sortUrl：每行一个「分类名::地址」；没有 `::` 的整行当地址 */
+    /**
+     * legado 的 sortUrl：每项一个「分类名::地址」，项之间用换行**或 `&&`** 分隔（Legado 按 `(&&|\n)+` 拆）；
+     * 没有 `::` 的整项当地址。从前只按换行拆，写成一行 `a::url1&&b::url2` 的源只剩一个分类、
+     * 地址还是一长串拼接起来的错地址。
+     */
     private fun parseSorts(raw: String?): List<RssSort> {
         if (raw.isNullOrBlank()) return emptyList()
-        return raw.lines().mapNotNull { line ->
+        return raw.split(SORT_SEPARATOR).mapNotNull { line ->
             val t = line.trim()
             if (t.isEmpty()) return@mapNotNull null
             val idx = t.indexOf("::")
@@ -106,4 +111,6 @@ object LegadoRssConverter {
 
     private fun JsonObject.bool(key: String): Boolean? =
         (this[key] as? JsonPrimitive)?.booleanOrNull
+
+    private val SORT_SEPARATOR = Regex("(&&|\\r?\\n)+")
 }

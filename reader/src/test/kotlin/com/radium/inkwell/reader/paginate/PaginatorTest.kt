@@ -167,4 +167,19 @@ class PaginatorTest {
         assertEquals(true, result.complete)
         assertEquals(2, result.chapter.pages.size)
     }
+
+    @Test
+    fun `目标落在跨页长段里时，中途结果定位到目标所在的那一页`() {
+        // 450 字 = 30 行 = 3 页（每页 150 字）；目标第 160 字在第 2 页。
+        // 中途回调时这一段还没排完，从前总字数按段首算（0），目标被夹回第 1 页
+        val content = ChapterContent(listOf(ContentElement.Paragraph(cjk(450))))
+        var partial: Paginator.Result? = null
+        paginator.paginate(
+            0, "", content, spec(),
+            notifyAfterChar = 160,
+            onPartial = { if (partial == null) partial = it },
+        )
+        val first = checkNotNull(partial) { "应先回调一次" }
+        assertEquals(1, first.chapter.pageIndexFor(160))
+    }
 }

@@ -62,6 +62,16 @@ class ScriptRuntimeTest {
         }
     }
 
+    /** 脚本经桥回调到 eval（java.getString("@js:…") 就是这样）：内层不能把外层的指令计数清零 */
+    @Test
+    fun `nested eval does not reset the instruction budget`() {
+        val fast = RhinoScriptRuntime(maxInstructions = 500_000)
+        // 有限次循环：没有这道修复时它会（慢慢）跑完而不是卡死测试进程；有修复时远不到一半就该被掐断
+        assertFailsWith<IllegalStateException> {
+            fast.eval("for (var i = 0; i < 200000; i++) { cb.again() }", mapOf("cb" to NestedEvalBridge(fast)))
+        }
+    }
+
     @Test
     fun `java bridge is not exposed`() {
         // initSafeStandardObjects 不注入 Packages/java 对象

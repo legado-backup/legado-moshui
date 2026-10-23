@@ -4,6 +4,7 @@ import com.jayway.jsonpath.Configuration
 import com.jayway.jsonpath.JsonPath
 import com.jayway.jsonpath.Option
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 import java.nio.charset.Charset
@@ -72,12 +73,21 @@ class RuleEvaluator(
     private fun guarded(text: String): CharSequence = GuardedText(text, Budget())
 
     /** 正则超预算 = 这条规则没匹配上。降级交由调用方，超时本身不该外泄成"书源坏了" */
-    private fun <T> withRegexBudget(fallback: T, block: () -> T): T =
+    private fun <T> withRegexBudget(pattern: String, fallback: T, block: () -> T): T =
         try {
-            block()
+            guardedRegex(pattern, block)
         } catch (_: RegexBudgetExceeded) {
             fallback
         }
+
+    /**
+     * 一次正则操作交给 [RegexWatchdog]：真机（ICU）上 [GuardedText] 拦不住回溯，
+     * 只能让调用方别陪着卡死。本进程内超时过的 pattern 直接按超时处理，不再钉死新线程。
+     */
+    private fun <T> guardedRegex(pattern: String, block: () -> T): T {
+        if (RegexWatchdog.isPoisoned(pattern)) throw RegexBudgetExceeded()
+        return RegexWatchdog.run(current = { pattern }, block = block)
+    }
 
     private val jsonConf: Configuration =
         Configuration.builder().options(Option.SUPPRESS_EXCEPTIONS).build()
@@ -234,7 +244,7 @@ class RuleEvaluator(
         // 下面的预算关卡只接 RegexBudgetExceeded，不兜这一种 —— 于是它会绕过分析器
         // 「永不抛错、降级为空」的承诺，直接把整章正文打成加载失败。按「未匹配」处理。
         val regex = runCatching { regexOf(pattern) }.getOrElse { return emptyList() }
-        return withRegexBudget(emptyList()) {
+        return withRegexBudget(pattern, emptyList()) {
             regex.findAll(guarded(target))
                 .map { m -> if (m.groupValues.size > 1) m.groupValues[1] else m.value }
                 .filter { it.isNotEmpty() }
@@ -402,9 +412,23 @@ class RuleEvaluator(
     private fun varValue(name: String, ctx: EvalContext): String =
         if (name == "baseUrl") ctx.baseUrl else ctx.vars[name].orEmpty()
 
-    /** 元素上下文取 outerHtml（可匹配属性与脚本内容），否则取 JSON/文本值 */
-    private fun contextText(ctx: EvalContext): String =
-        ctx.element?.outerHtml() ?: (ctx.json as? String ?: ctx.json?.toString() ?: "")
+    /**
+     * 规则当前作用对象的文本形式：`:regex` 匹配它，页面级 `<js>` / `@js:` 的 `result` 也是它。
+     *
+     * **整页**（以及把上一步产物重新当页面解析的子上下文）同时带着 Jsoup 文档和**原文**，
+     * 这时必须给原文 —— Legado 的 `result` 就是响应体字符串本身。从前给的是 `outerHtml()`，
+     * 拿到的是 Jsoup 重新序列化过的东西：JSON 接口被包进 `<html><body>`，`JSON.parse(result)`
+     * 直接失败、目录为空；文本里的 `& < >` 变成实体，正则抠出来的书名和链接带着 `&amp;`；
+     * 引号被规范化、标签被重新缩进，照着网页源码写的正则也对不上。
+     *
+     * 元素上下文（列表项、选择器结果）没有原文可给，取 outerHtml（可匹配属性与脚本内容）；
+     * 其余取 JSON/文本值。
+     */
+    private fun contextText(ctx: EvalContext): String {
+        val raw = ctx.json as? String
+        if (raw != null && ctx.element is Document) return raw
+        return ctx.element?.outerHtml() ?: raw ?: ctx.json?.toString() ?: ""
+    }
 
     // ---- 管道 ----
 
@@ -412,14 +436,18 @@ class RuleEvaluator(
         is PipeOp.RegexReplace -> list.map {
             // 替换串里的 `$` 可能是非法组引用（Legado 书源里屡见），别让它打死整条链路。
             // 超预算（灾难性回溯）一并落在这里：保留原文，等同于这条替换没生效
-            runCatching { regexOf(op.pattern).replace(guarded(it), op.replacement) }.getOrDefault(it)
+            runCatching {
+                guardedRegex(op.pattern) { regexOf(op.pattern).replace(guarded(it), op.replacement) }
+            }.getOrDefault(it)
         }
         is PipeOp.RegexReplaceFirst -> list.map { s ->
             // Legado replaceFirst：取首个匹配、在其匹配区间内替换；未命中则清空（抽取语义）
             // 编译也放进 runCatching：坏正则同样按「未命中」清空，别抛出去
             runCatching {
                 val re = regexOf(op.pattern)
-                re.find(guarded(s))?.let { re.replaceFirst(it.value, op.replacement) } ?: ""
+                guardedRegex(op.pattern) {
+                    re.find(guarded(s))?.let { re.replaceFirst(it.value, op.replacement) } ?: ""
+                }
             }.getOrDefault("")
         }
         is PipeOp.Put -> {

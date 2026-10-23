@@ -243,7 +243,9 @@ private class EpubBookHandle(
 
 /** 以 baseDir 为基准解析相对路径，处理 ../ 与 URL 编码 */
 internal fun resolvePath(baseDir: String, href: String): String {
-    val decoded = runCatching { URLDecoder.decode(href, "UTF-8") }.getOrDefault(href)
+    // href 是 URI 引用：`+` 是字面的加号，空格写作 %20。URLDecoder 按表单编码解，会把 `+` 解成空格 ——
+    // 文件名带 `+` 的章节（`chapter+1.xhtml`）就找不到了。先把 `+` 护住再解
+    val decoded = runCatching { URLDecoder.decode(href.replace("+", "%2B"), "UTF-8") }.getOrDefault(href)
     val parts = ArrayDeque<String>()
     if (baseDir.isNotEmpty() && !decoded.startsWith("/")) {
         baseDir.split('/').filter { it.isNotEmpty() }.forEach { parts.addLast(it) }

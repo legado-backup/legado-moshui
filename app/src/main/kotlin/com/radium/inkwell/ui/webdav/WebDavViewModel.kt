@@ -8,6 +8,8 @@ import com.radium.inkwell.data.prefs.WebDavProvider
 import com.radium.inkwell.data.repo.OfficialWebDavRepository
 import com.radium.inkwell.data.repo.WebDavRepository
 import com.radium.inkwell.ui.components.MessageBus
+import com.radium.inkwell.util.LocalNetworkAccess
+import com.radium.inkwell.util.LocalNetworkPermissionMissing
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +40,8 @@ data class WebDavUiState(
     val confirmSwitchToCustom: Boolean = false,
     val confirmDisconnect: Boolean = false,
     val confirmRegenerate: Boolean = false,
+    /** 地址在局域网里、缺 Android 17 的局域网权限：先讲清楚为什么要「附近设备」，再弹系统授权 */
+    val askLocalNetwork: Boolean = false,
 ) {
     val busy: Boolean get() = testing || syncing
 }
@@ -46,6 +50,7 @@ class WebDavViewModel(
     private val prefs: WebDavPrefs,
     private val repo: WebDavRepository,
     private val official: OfficialWebDavRepository,
+    private val localNetwork: LocalNetworkAccess,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(WebDavUiState())
@@ -55,6 +60,9 @@ class WebDavViewModel(
 
     private var authJob: Job? = null
     private var cooldownJob: Job? = null
+
+    /** 授权回来要接着做的那件事（测试并保存 / 立即同步）—— 用户点的是它，不是「授权」 */
+    private var afterLocalNetworkGrant: (() -> Unit)? = null
 
     init {
         viewModelScope.launch {
@@ -217,6 +225,10 @@ class WebDavViewModel(
         if (s.busy) return
         viewModelScope.launch {
             _state.update { it.copy(testing = true) }
+            if (localNetwork.isBlocked(s.url)) {
+                askLocalNetwork(then = ::testAndSave)
+                return@launch
+            }
             val result = repo.testConnection(s.url, s.davUsername, s.davPassword)
             if (result.isSuccess) {
                 prefs.save(s.url, s.davUsername, s.davPassword)
@@ -248,7 +260,36 @@ class WebDavViewModel(
                     lastSyncAt = if (result.isSuccess) System.currentTimeMillis() else it.lastSyncAt,
                 )
             }
+            // 判定放在仓库里：同步连的是**已保存**的地址，页面上的输入框可能改了还没存
+            if (result.exceptionOrNull() is LocalNetworkPermissionMissing) {
+                askLocalNetwork(then = ::syncNow)
+                return@launch
+            }
             messages.emit(result.getOrElse { "同步失败: ${it.message}" })
+        }
+    }
+
+    private fun askLocalNetwork(then: () -> Unit) {
+        afterLocalNetworkGrant = then
+        _state.update { it.copy(testing = false, syncing = false, askLocalNetwork = true) }
+    }
+
+    /** 说明框点了「去授权」：页面接着拉起系统授权框，结果回到 [onLocalNetworkPermissionResult] */
+    fun confirmLocalNetwork() = _state.update { it.copy(askLocalNetwork = false) }
+
+    fun dismissLocalNetwork() {
+        afterLocalNetworkGrant = null
+        _state.update { it.copy(askLocalNetwork = false) }
+    }
+
+    fun onLocalNetworkPermissionResult(granted: Boolean) {
+        val then = afterLocalNetworkGrant
+        afterLocalNetworkGrant = null
+        if (granted) {
+            then?.invoke()
+        } else {
+            // 拒过一次之后系统可能不再弹框、直接回「拒绝」—— 得告诉用户去哪儿手动开
+            messages.emit("没有「附近设备」权限，连不上局域网里的 WebDAV。可在系统设置 → 应用 → Inkwell → 权限里开启")
         }
     }
 

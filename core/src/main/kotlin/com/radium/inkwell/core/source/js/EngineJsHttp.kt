@@ -2,6 +2,7 @@ package com.radium.inkwell.core.source.js
 
 import com.radium.inkwell.core.source.SourceHttpClient
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asContextElement
@@ -51,13 +52,20 @@ class EngineJsHttp(
         headers: Map<String, String>,
     ): StrResponse? = runCatching {
         val parent = parentJob.get()
+        // 外层已经取消了就别再发：同一段脚本里后面的 java.ajax、目录逐条执行的脚本都会走到这里，
+        // 每一个都会实打实跑完一整个请求（最长 [timeout]），用户早就离开了页面
+        if (parent?.isCancelled == true) return null
         runBlocking {
             val blockingScope = this
             // 看门协程**挂在外层 Job 之下**：父一进入 cancelling，子立刻被取消 —— 这才是我们要的
             // 「外层取消」信号。从前写的是 `p.join()`，等的却是父「完成」；而父此刻正被这个
             // runBlocking 堵着、完成不了，于是永远等不到，取消一次也没传进来过。
+            //
+            // UNDISPATCHED：父若恰在这之前进入 cancelling，普通 launch 出来的子协程**根本不会开跑**，
+            // finally 也就不执行 —— 这一次请求照样跑满。立即执行到第一个挂起点，awaitCancellation
+            // 当场抛出、finally 当场掐掉 runBlocking。
             val watcher = parent?.let { p ->
-                CoroutineScope(p + Dispatchers.Unconfined).launch {
+                CoroutineScope(p + Dispatchers.Unconfined).launch(start = CoroutineStart.UNDISPATCHED) {
                     try {
                         awaitCancellation()
                     } finally {

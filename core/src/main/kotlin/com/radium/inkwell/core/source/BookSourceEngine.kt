@@ -2,8 +2,11 @@ package com.radium.inkwell.core.source
 
 import com.radium.inkwell.core.model.ContentElement
 import com.radium.inkwell.core.parser.html.HtmlToElements
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.json.contentOrNull
@@ -120,7 +123,18 @@ class BookSourceEngine(
      */
     private suspend fun <T> engineIo(block: suspend () -> T): T =
         withContext(Dispatchers.IO) {
-            withContext(jsHttp.bindingTo(coroutineContext[Job])) { block() }
+            withContext(jsHttp.bindingTo(coroutineContext[Job])) {
+                try {
+                    block()
+                } catch (e: Exception) {
+                    // 脚本里的 java.ajax 是同步桥：外层被取消时它只能交回空串，脚本随之「正常」跑完，
+                    // 规则抽不到东西 → SourceException("正文规则未匹配到内容")。这一路冒到阅读页，
+                    // 「翻页取消了上一次加载」就成了「章节读不出来」，进而误触发自动换源、清缓存 ——
+                    // 正是本项目「catch 前先 rethrow 取消」要防的那件事。外层已在取消，就还原成取消。
+                    if (e !is CancellationException) currentCoroutineContext().ensureActive()
+                    throw e
+                }
+            }
         }
     suspend fun search(source: BookSourceRule, keyword: String, page: Int = 1): SearchPage =
         engineIo {
@@ -269,7 +283,7 @@ class BookSourceEngine(
         // 从前只取第一个：第一个常是「当前页」，visited 一撞就停，目录只剩第一页。
         while (pending.isNotEmpty() && pages < MAX_TOC_PAGES) {
             val url = pending.removeFirst()
-            if (!visited.add(url)) continue
+            if (!visited.add(pageKey(url))) continue
             pages++
             val fetched = fetchPage(source, url, "toc", render)
             val ctx = pageContext(
@@ -292,7 +306,7 @@ class BookSourceEngine(
                 .orEmpty()
             for (n in nexts) {
                 val resolved = resolveUrl(fetched.finalUrl, n)
-                if (resolved.isNotBlank() && resolved !in visited) pending.add(resolved)
+                if (isFetchable(resolved) && pageKey(resolved) !in visited) pending.add(resolved)
             }
         }
         if (collected.isEmpty()) return null
@@ -365,11 +379,11 @@ class BookSourceEngine(
         val userPurifier = Purifier.lenient(globalPurify(source))
         val elements = mutableListOf<ContentElement>()
         val firstUrl = resolveUrl(source.baseUrl, chapterUrl)
-        val stopAt = otherChapterUrls.filterNotTo(HashSet()) { it == firstUrl }
+        val stopAt = otherChapterUrls.mapNotNullTo(HashSet()) { u -> pageKey(u).takeIf { it != pageKey(firstUrl) } }
         var url: String? = firstUrl
         val visited = HashSet<String>()
         var pages = 0
-        while (url != null && pages < MAX_CONTENT_PAGES && visited.add(url)) {
+        while (url != null && pages < MAX_CONTENT_PAGES && visited.add(pageKey(url))) {
             pages++
             val fetched = fetchPage(source, url, "content", render)
             // 目录阶段存下的变量在这里喂回脚本：正文规则的 @get:{k} / java.get(k) 靠它
@@ -391,7 +405,10 @@ class BookSourceEngine(
                 ?.let { evalUrlField("content", "nextPage", it, ctx) }
                 ?.takeIf { it.isNotBlank() }
                 ?.let { resolveUrl(fetched.finalUrl, it) }
-                ?.takeIf { it !in stopAt } // 翻到别的章节了 → 本章结束
+                // 末页的「下一页」常是 javascript:void(0)：当作没有下一页。从前拿去抓会抛「非法 URL」，
+                // 前面已经攒好的几页一起作废，整章判失败、还触发自动换源
+                ?.takeIf { isFetchable(it) }
+                ?.takeIf { pageKey(it) !in stopAt } // 翻到别的章节了 → 本章结束
         }
         // 净化超时（某条规则陷进灾难性回溯）就按未净化返回：净化只是清广告，
         // 不能让它把"这章有广告"升级成"这章打不开"。
@@ -824,6 +841,32 @@ internal fun resolveUrl(base: String, ref: String): String {
         else -> base.toHttpUrlOrNull()?.resolve(bare)?.toString() ?: bare
     }
     return resolved + suffix
+}
+
+/** 去掉 `,{…}` 选项后的地址本体 */
+private fun bareUrl(url: String): String {
+    val optAt = optionsIndex(url)
+    return if (optAt >= 0) url.substring(0, optAt) else url
+}
+
+/** 能拿去抓的地址：http(s)。`javascript:void(0)`、空串、未能解析成绝对地址的相对路径都不算 */
+internal fun isFetchable(url: String): Boolean {
+    val bare = bareUrl(url).trim()
+    return bare.startsWith("http://", ignoreCase = true) || bare.startsWith("https://", ignoreCase = true)
+}
+
+/**
+ * 翻页时判「这一页去过没有」用的键：去掉 `#` 片段（片段不发给服务器，是同一页）。
+ *
+ * 末页的「下一页」常写成 `href="#"`，解析出来是当前页地址加个 `#`；按原字符串比会被当成新的一页
+ * 再抓一遍，正文就重复了一整页。只在这里去，不改 [resolveUrl] —— 用 hash 路由的单页站点
+ * （`/#/book/1`）走 WebView 渲染时，片段是有意义的。
+ */
+internal fun pageKey(url: String): String {
+    val optAt = optionsIndex(url)
+    val bare = if (optAt >= 0) url.substring(0, optAt) else url
+    val suffix = if (optAt >= 0) url.substring(optAt) else ""
+    return bare.substringBefore('#') + suffix
 }
 
 /** Legado 的地址选项后缀：`url,{"method":"POST","body":"…"}`（常用单引号） */

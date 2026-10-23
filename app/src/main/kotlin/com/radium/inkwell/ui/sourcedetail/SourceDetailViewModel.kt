@@ -6,6 +6,7 @@ import com.radium.inkwell.core.source.BookSourceEngine
 import com.radium.inkwell.data.repo.BookSourceRepository
 import com.radium.inkwell.data.repo.NetBookRepository
 import com.radium.inkwell.ui.components.MessageBus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -85,6 +86,9 @@ class SourceDetailViewModel(
                     .take(2).joinToString(" / ") { it.text.take(40) }
                 report.appendLine("✔ 正文: ${content.elements.size} 段")
                 report.appendLine("  预览: $preview")
+            } catch (e: CancellationException) {
+                // 离开页面掐掉了冒烟，不是书源坏了 —— 别往报告里写一条「失败」
+                throw e
             } catch (e: Exception) {
                 report.appendLine("✘ 失败: ${e.message}")
             }

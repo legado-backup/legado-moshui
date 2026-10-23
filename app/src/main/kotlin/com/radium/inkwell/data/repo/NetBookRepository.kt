@@ -1,5 +1,7 @@
 package com.radium.inkwell.data.repo
 
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import com.radium.inkwell.core.source.BookSourceEngine
 import com.radium.inkwell.core.source.BookSourceRule
 import com.radium.inkwell.core.source.RemoteBookDetail
@@ -129,7 +131,13 @@ class NetBookRepository(
                     readCharOffset = readOffset,
                     readAt = existing?.readAt ?: 0,
                     addedAt = existing?.addedAt ?: now,
-                    updatedAt = now,
+                    // 只有在架/墓碑状态真变了（新加、删过又加回来）才算一次用户修改、盖新时间戳。
+                    // 已在架的书再从预览进一次也盖 now 的话，这一行就会带着本机的旧分组/隐藏
+                    // 在 WebDAV 合并里赢过别的设备刚做的修改（合并按 updatedAt 做 LWW）。
+                    updatedAt = existing
+                        ?.takeIf { it.inShelf == flags.inShelf && it.deleted == flags.deleted }
+                        ?.updatedAt
+                        ?: now,
                     // upsert 是**整行**替换：这里没列出来的列会被写回默认值。下面这些是用户
                     // 和追更攒下来的状态，跟「这本书从哪个源抓的」无关，重新入库必须原样带过来 ——
                     // 否则分组掉回未分组、隐藏的书自己冒回书架、红点被抹平。
@@ -156,56 +164,60 @@ class NetBookRepository(
             bookAuthor = book.author.orEmpty(),
         )
         check(toc.isNotEmpty()) { "目录解析为空" }
-        // 网络往返可能长达数分钟，其间用户可能已经进书读了几页（进度/readAt/红点都变了）。
-        // 用传入的旧快照整行 copy 会把这些变化抹掉，所以在写库前重新读一次最新行为基准。
-        val fresh = bookDao.getById(book.id) ?: book
-        // 追更同样要对齐进度：站点在前面插入公告章/防盗章后目录整体后移，
-        // 沿用旧序号会直接跳章（从前只有换源做了对齐，追更没做）
-        val (readIndex, readOffset) = alignProgress(fresh.id, fresh, toc)
-        val added = (toc.size - fresh.totalChapters).coerceAtLeast(0)
 
         // 旧版 WebDAV 根本不带封面，同步下来的网络书 coverPath 一直是 null；
         // 下拉刷新只追目录、不抓详情，所以联网也永远补不回来。
         // 追更本来就要联网 —— 封面缺了就顺手拉一次详情补上，别逼用户重新加书架。
         // 详情失败不影响追更本身（封面可有可无，目录才是这次要的）。
-        var coverPath = fresh.coverPath
-        var intro = fresh.intro
-        if (coverPath.isNullOrBlank()) {
-            val bookUrl = fresh.bookUrl
-            if (!bookUrl.isNullOrBlank()) {
-                val detail = try {
-                    engine.getDetail(rule, bookUrl)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    null
-                }
-                if (detail != null) {
-                    if (coverPath.isNullOrBlank()) coverPath = detail.coverUrl
-                    if (intro.isNullOrBlank()) intro = detail.intro?.htmlToPlainText()
-                }
+        // 这一趟也是网络往返，所以必须放在下面「重读最新行」**之前** —— 放在之后，
+        // 这几秒里用户删书/隐藏/改分组/读了几页，都会被随后的整行 copy 抹回去（删掉的书复活）。
+        val detailUrl = book.bookUrl
+        val detail = if (book.coverPath.isNullOrBlank() && !detailUrl.isNullOrBlank()) {
+            try {
+                engine.getDetail(rule, detailUrl)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
             }
+        } else {
+            null
         }
-
+        // 逐章查缓存是文件 IO，算好了再进事务
         val entities = buildToc(book.id, toc)
-        val refreshed = fresh.copy(
-            totalChapters = toc.size,
-            latestChapterTitle = toc.lastOrNull()?.title,
-            readChapterIndex = readIndex,
-            readCharOffset = readOffset,
-            coverPath = coverPath,
-            intro = intro,
-            // 累加而不是覆盖：连刷两次、第二次没新章，不该把第一次的 5 章抹成 0 ——
-            // 红点记的是"自从你上次打开之后"，不是"自从上次刷新之后"
-            newChapterCount = fresh.newChapterCount + added,
-        )
+
+        var added = 0
         db.withWriteTransaction {
+            // 网络往返可能长达数分钟，其间用户可能已经进书读了几页、删了书、改了分组。
+            // 用传入的旧快照整行 copy 会把这些变化抹掉 —— 所有网络都走完之后、在写事务里重读一次为准。
+            val fresh = bookDao.getById(book.id) ?: book
+            // 追更同样要对齐进度：站点在前面插入公告章/防盗章后目录整体后移，沿用旧序号会直接跳章
+            // （从前只有换源做了对齐，追更没做）。对齐要读旧目录，必须在 replaceToc 之前
+            val (readIndex, readOffset) = alignProgress(fresh.id, fresh, toc)
+            added = (toc.size - fresh.totalChapters).coerceAtLeast(0)
+            val refreshed = fresh.copy(
+                totalChapters = toc.size,
+                latestChapterTitle = toc.lastOrNull()?.title,
+                readChapterIndex = readIndex,
+                readCharOffset = readOffset,
+                coverPath = fresh.coverPath.takeUnless { it.isNullOrBlank() } ?: detail?.coverUrl ?: fresh.coverPath,
+                intro = fresh.intro.takeUnless { it.isNullOrBlank() }
+                    ?: detail?.intro?.htmlToPlainText()
+                    ?: fresh.intro,
+                // 累加而不是覆盖：连刷两次、第二次没新章，不该把第一次的 5 章抹成 0 ——
+                // 红点记的是"自从你上次打开之后"，不是"自从上次刷新之后"
+                newChapterCount = fresh.newChapterCount + added,
+            )
             replaceToc(book.id, entities)
-            // 一个字段都没变就别写库。否则每本书 updatedAt 一变，书架的 observeAll 就整表重发一轮 ——
-            // 下拉刷"没有新章节"时，全书架反复重组、转圈跟着掉帧。也顺带免掉一次无意义的 WebDAV 时间戳变更。
-            if (refreshed != fresh) {
-                bookDao.update(refreshed.copy(updatedAt = System.currentTimeMillis()))
-            }
+            // 一个字段都没变就别写库。否则书架的 observeAll 就整表重发一轮 ——
+            // 下拉刷"没有新章节"时，全书架反复重组、转圈跟着掉帧。
+            //
+            // **不盖 updatedAt**。它是 WebDAV 合并书籍元数据（分组/隐藏/删除）的 LWW 裁决依据，
+            // 而追更只是「站点上多了几章」，不是用户改了什么。从前这里盖了 now：另一台设备刚改过
+            // 分组、还没同步上来，这台一追更，带着**旧分组**的这一行反而成了"更新的那一份"，
+            // 同步时把对方的修改盖回去 —— 删掉的书复活、隐藏的书冒回书架。连载中的书几乎必踩。
+            // 章数不靠它同步（合并取大），封面走「谁有算谁的」，都不需要这个时间戳背书。
+            if (refreshed != fresh) bookDao.update(refreshed)
         }
         Result.success(added)
     } catch (e: CancellationException) {
@@ -218,7 +230,11 @@ class NetBookRepository(
      * 目录条目（含 isCached 判定）。isCached 按章节 URL 而非序号：目录变动后序号会错位，缓存得跟着章节走。
      * cache.has 会做文件 stat，**在事务外**先算好，别把一堆磁盘 IO 圈进 DB 事务里拉长锁。
      */
-    private fun buildToc(bookId: String, toc: List<RemoteChapter>): List<ChapterEntity> {
+    /** 逐章 stat 缓存文件、外加一次目录清理：几千章就是几千次文件 IO，书架/阅读页/预览都在主线程上调 */
+    private suspend fun buildToc(bookId: String, toc: List<RemoteChapter>): List<ChapterEntity> =
+        withContext(Dispatchers.IO) { buildTocOnIo(bookId, toc) }
+
+    private fun buildTocOnIo(bookId: String, toc: List<RemoteChapter>): List<ChapterEntity> {
         cache.purgeLegacy(bookId)
         return toc.map {
             ChapterEntity(
@@ -277,6 +293,12 @@ class NetBookRepository(
          * 走对齐反而会把用户读到的位置弄丢，撤销就成了另一次破坏。
          */
         restore: ReadAnchor? = null,
+        /**
+         * 按这个位置（旧目录里的章号）去对齐，而不是库里存的进度。供自动换源用：
+         * 用户是在**翻向**某一章时失败的，库里存的还是上一章 —— 按它对齐，换完源就被送回
+         * 刚读完那章的开头。
+         */
+        alignFrom: ReadAnchor? = null,
     ): Result<Unit> = try {
         val (detail, toc) = fetchDetailAndToc(newRule, newResult.bookUrl)
         check(toc.isNotEmpty()) { "新书源目录为空" }
@@ -286,9 +308,14 @@ class NetBookRepository(
         val fresh = bookDao.getById(book.id) ?: book
         val (newIndex, newOffset) = restore
             ?.let { it.chapterIndex.coerceIn(0, toc.lastIndex) to it.charOffset }
-            ?: alignProgress(fresh.id, fresh, toc).let { it.first to 0 }
+            ?: alignProgress(
+                fresh.id,
+                alignFrom?.let { fresh.copy(readChapterIndex = it.chapterIndex, readCharOffset = it.charOffset) }
+                    ?: fresh,
+                toc,
+            ).let { it.first to 0 }
 
-        cache.clear(book.id) // 旧源的正文缓存整本作废
+        withContext(Dispatchers.IO) { cache.clear(book.id) } // 旧源的正文缓存整本作废（成千个文件）
         val entities = buildToc(book.id, toc)
         db.withWriteTransaction {
             replaceToc(book.id, entities)

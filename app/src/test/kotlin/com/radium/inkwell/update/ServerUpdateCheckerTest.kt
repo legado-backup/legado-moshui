@@ -46,6 +46,18 @@ class ServerUpdateCheckerTest {
         assertEquals("/api/v1/update/beta?current=v0.1.0-beta.62", server.takeRequest().path)
     }
 
+    /**
+     * 服务端按 tag 字符串比，不相等就回 has_update=true。装着更新的版本时不能被「升级」回旧版：
+     * 0.1.0-beta.63 的 versionCode 与 0.1.0 相同，装得上 —— 那就是一次悄无声息的降级。
+     */
+    @Test
+    fun `has_update true but not newer is UpToDate`() {
+        server.enqueue(MockResponse().setBody(body))
+        runBlocking {
+            assertIs<CheckResult.UpToDate>(checker.check(UpdateChannel.BETA, "0.1.0"))
+        }
+    }
+
     // 用块体（返回 Unit）：assertIs 会返回值，若做表达式体的末句会让 @Test 方法非 void，JUnit 拒收
     @Test
     fun `has_update false returns UpToDate`() {

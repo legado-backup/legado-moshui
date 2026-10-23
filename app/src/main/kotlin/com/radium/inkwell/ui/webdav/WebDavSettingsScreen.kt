@@ -2,6 +2,8 @@ package com.radium.inkwell.ui.webdav
 
 import android.content.ClipData
 import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -56,6 +58,7 @@ import com.radium.inkwell.ui.components.SwitchRow
 import com.radium.inkwell.ui.components.rememberAppTopBarScroll
 import com.radium.inkwell.ui.components.settingsPageColor
 import com.radium.inkwell.ui.components.topBarScroll
+import com.radium.inkwell.util.LocalNetworkAccess
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -67,6 +70,10 @@ fun WebDavSettingsScreen(onBack: () -> Unit, viewModel: WebDavViewModel) {
     val snackbar = remember { SnackbarHostState() }
 
     CollectMessages(viewModel.messages, snackbar)
+
+    val localNetworkPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> viewModel.onLocalNetworkPermissionResult(granted) }
 
     val pageColor = settingsPageColor()
     val topBarScroll = rememberAppTopBarScroll()
@@ -126,6 +133,20 @@ fun WebDavSettingsScreen(onBack: () -> Unit, viewModel: WebDavViewModel) {
             text = "旧应用码会立刻失效。其他已填过旧码的设备需要重新登录一次。",
             confirmText = "生成",
             onConfirm = viewModel::regenerateAppPassword,
+        )
+    }
+    if (state.askLocalNetwork) {
+        // 系统授权框只写「查找、连接附近设备」，和 WebDAV 看不出关系 —— 不先讲一句，多数人会点拒绝
+        AppAlertDialog(
+            onDismissRequest = viewModel::dismissLocalNetwork,
+            title = "需要「附近设备」权限",
+            text = "这个地址在局域网里（比如家里的 NAS）。从 Android 17 起，连接局域网里的设备要先授予" +
+                "「附近设备」权限，否则连接会一直超时。\n\n只用于连接你填写的这个 WebDAV 地址。",
+            confirmText = "去授权",
+            onConfirm = {
+                viewModel.confirmLocalNetwork()
+                localNetworkPermission.launch(LocalNetworkAccess.PERMISSION)
+            },
         )
     }
     if (state.showConnectionInfo) {

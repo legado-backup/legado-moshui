@@ -1,19 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  把 WebDAV 凭据挡在云备份之外。
-
-  WebDAV 的地址/账号/口令存在 DataStore Preferences 里，是**明文**（protobuf 里就是裸字符串）。
-  Auto Backup 默认会把整个 filesDir 传到用户的 Google Drive —— 口令跟着一起上云，
-  而用户在应用里完全看不出这件事发生过。
+  WebDAV 的配置文件（地址、账号、口令、官方令牌、本机 device_id）不随备份与换机迁移走。
 
   只排掉这一个文件，不是整个关掉备份（android:allowBackup="false"）：书、书源、阅读进度
   照旧该备份，那是用户换机时真正想要的东西。
 
-  device-transfer 不排：那是换机时设备到设备的直连迁移，不经第三方，把 WebDAV 配置带过去
-  正是用户的预期；真正的暴露面是云端那份。
+  cloud-backup：Auto Backup 会把整个 filesDir 传到用户的 Google Drive，凭据不该跟着上云。
+
+  device-transfer 从前不排，理由是「把 WebDAV 配置带过去正是用户的预期」。但口令与令牌早已
+  改成用 AndroidKeyStore 里的密钥加密（SecretCipher），那把密钥**不会**随迁移过去 —— 新手机上
+  解出来是空串，地址和账号却还在：界面显示已配置 / 官方已连接，每次自动同步都静默 401。
+  device_id 也在这个文件里，被克隆过去后两台设备的应用码同名，新机一重新登录就会把旧机的码
+  作废（0.3.8 修的就是这件事）。所以迁移也排掉：新手机上重新填一次 / 重新登录一次。
 -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="file" path="datastore/webdav.preferences_pb" />
     </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="datastore/webdav.preferences_pb" />
+    </device-transfer>
 </data-extraction-rules>

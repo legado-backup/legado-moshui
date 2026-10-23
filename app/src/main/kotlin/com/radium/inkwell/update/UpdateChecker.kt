@@ -1,5 +1,6 @@
 package com.radium.inkwell.update
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
@@ -73,6 +74,9 @@ class UpdateChecker(
             } else {
                 CheckResult.UpToDate
             }
+        } catch (e: CancellationException) {
+            // 离开设置页 / 新一轮检查掐掉了这一次，不是「检查失败」
+            throw e
         } catch (e: Exception) {
             CheckResult.Failed(e.message ?: "网络错误")
         }

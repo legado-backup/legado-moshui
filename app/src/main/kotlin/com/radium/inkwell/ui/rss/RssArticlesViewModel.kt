@@ -72,7 +72,9 @@ class RssArticlesViewModel(
             )
             runCatching { engine.articles(r, sort.url) }
                 .onSuccess { page ->
-                    _state.value = _state.value.copy(loading = false, articles = page.items)
+                    // 列表按 key（link，没有就标题）做 key：抓网页的订阅源常把置顶文章在列表里再列一遍，
+                    // 没有链接的几条也可能同名 —— 重复一条就是「Key was already used」崩溃
+                    _state.value = _state.value.copy(loading = false, articles = page.items.distinctBy { it.key })
                 }
                 .onFailure {
                     // 切分类会 cancel 上一轮，runCatching 连 CancellationException 一起吞：

@@ -112,7 +112,9 @@ fun SearchScreen(
         }
     }
 
-    LaunchedEffect(nearEnd) {
+    // 只认 nearEnd 的 false→true 跳变不够：一页只多出两三行、或第一页一屏就放得下时 nearEnd 一直是 true，
+    // 下一页永远不会来，得往回滑再滑下来才能触发。每次加载落地（条数、hasMore、加载状态变化）都再判一次。
+    LaunchedEffect(nearEnd, state.hasMore, state.searching, state.loadingMore, state.results.size) {
         if (nearEnd) viewModel.loadMore()
     }
 
@@ -210,7 +212,7 @@ fun SearchScreen(
                             coverModel = hit.preferred.coverUrl ?: result.coverUrl,
                             // 已在书架就显示"已加入"且不可点，不再让人重复加
                             trailingLabel = if (inShelf) "已加入" else "加入",
-                            trailingLoading = state.addingUrl == result.bookUrl,
+                            trailingLoading = result.bookUrl in state.addingUrls,
                             trailingEnabled = !inShelf,
                             onTrailing = { viewModel.addToShelf(hit) },
                             onClick = {

@@ -1,5 +1,7 @@
 package com.radium.inkwell.data.repo
 
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
 import android.os.Build
 import com.radium.inkwell.core.webdav.WebDavClient
 import com.radium.inkwell.data.net.OfficialAppPassword
@@ -43,19 +45,26 @@ class OfficialWebDavRepository(
 
     suspend fun regenerateAppPassword(): Result<Unit> {
         return try {
-            val issued = withFreshAccess { access -> issueAppPassword(access) }
-            val config = prefs.config.first()
-            check(issued.secret.isNotBlank()) { "服务端未返回应用码" }
-            val url = OfficialWebDav.resolveDavUrl(config.url)
-            WebDavClient(url, config.username, issued.secret).check().getOrThrow()
-            prefs.saveOfficial(
-                url = url,
-                username = config.username,
-                password = issued.secret,
-                email = config.officialEmail,
-                accessToken = config.officialAccessToken,
-                refreshToken = config.officialRefreshToken,
-            )
+            val (url, username, secret) = withFreshAccess { access ->
+                // 见 provision：签发即作废旧码，签发与落盘必须一起完成
+                withContext(NonCancellable) {
+                    val issued = issueAppPassword(access)
+                    check(issued.secret.isNotBlank()) { "服务端未返回应用码" }
+                    // 签发之后再读配置：withFreshAccess 可能刚刷新过令牌并写回，开头那份是旧的
+                    val config = prefs.config.first()
+                    val url = OfficialWebDav.resolveDavUrl(config.url)
+                    prefs.saveOfficial(
+                        url = url,
+                        username = config.username,
+                        password = issued.secret,
+                        email = config.officialEmail,
+                        accessToken = config.officialAccessToken,
+                        refreshToken = config.officialRefreshToken,
+                    )
+                    Triple(url, config.username, issued.secret)
+                }
+            }
+            WebDavClient(url, username, secret).check().getOrThrow()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -86,17 +95,24 @@ class OfficialWebDavRepository(
             val me = api.me(session.tokens.accessToken)
             val davUrl = OfficialWebDav.resolveDavUrl(me.webdavUrl)
             val username = me.webdavUser.ifBlank { session.user.username }
-            val issued = issueAppPassword(session.tokens.accessToken)
-            check(issued.secret.isNotBlank()) { "服务端未返回应用码" }
+            // 签发新码会**当场**作废本机上一次的码（replace）—— 从这一刻起，手里只有新码是有效的。
+            // 所以先落盘、再做连通检查，且签发与落盘不可取消。从前是检查通过才保存：DAV 一时抽风、
+            // 或用户在这当口离开页面（协程被取消），prefs 里留着的就是刚被作废的旧码 ——
+            // 界面显示已连接，自动同步却一直静默 401。
+            val issued = withContext(NonCancellable) {
+                issueAppPassword(session.tokens.accessToken).also { issued ->
+                    check(issued.secret.isNotBlank()) { "服务端未返回应用码" }
+                    prefs.saveOfficial(
+                        url = davUrl,
+                        username = username,
+                        password = issued.secret,
+                        email = session.user.email.ifBlank { me.user.email },
+                        accessToken = session.tokens.accessToken,
+                        refreshToken = session.tokens.refreshToken,
+                    )
+                }
+            }
             WebDavClient(davUrl, username, issued.secret).check().getOrThrow()
-            prefs.saveOfficial(
-                url = davUrl,
-                username = username,
-                password = issued.secret,
-                email = session.user.email.ifBlank { me.user.email },
-                accessToken = session.tokens.accessToken,
-                refreshToken = session.tokens.refreshToken,
-            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e

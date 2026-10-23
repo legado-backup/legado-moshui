@@ -75,8 +75,15 @@ fun ExploreScreen(
             last >= listState.layoutInfo.totalItemsCount - 3
         }
     }
-    LaunchedEffect(nearEnd) {
+    // 同搜索页：只认 nearEnd 的跳变，一页只多两三行、或首页一屏放得下时就再也翻不动了
+    LaunchedEffect(nearEnd, state.hasMore, state.loading, state.loadingMore, state.books.size) {
         if (nearEnd) viewModel.loadMore()
+    }
+    // 换源/换分类回到顶部。listState 是跨分类共用的：上一个分类滑到第 40 条，新分类就被夹到
+    // 它的最后一屏打开，往往还顺手触发了第 2 页。切换时列表多半还在转圈、没挂上去，
+    // 用 requestScrollToItem —— 它在下一次测量时生效，不要求列表此刻已经布局
+    LaunchedEffect(state.sourceIndex, state.categoryIndex) {
+        listState.requestScrollToItem(0)
     }
 
     // 与搜索/书架同一套浅色灰底白卡，避免默认 surface 白底从书行圆角缝里透出来
@@ -147,7 +154,7 @@ fun ExploreScreen(
                     contentPadding = ContentListDefaults.listContentPadding(),
                     verticalArrangement = Arrangement.spacedBy(ContentListDefaults.ListSpacing),
                 ) {
-                    items(state.books, key = { "${it.sourceId}|${it.bookUrl}" }) { book ->
+                    items(state.books, key = { it.exploreKey }) { book ->
                         val inShelf = bookKey(book.title, book.author) in state.shelfKeys
                         BookListRow(
                             title = book.title,
@@ -156,7 +163,7 @@ fun ExploreScreen(
                             caption = book.intro,
                             coverModel = book.coverUrl,
                             trailingLabel = if (inShelf) "已加入" else "加入",
-                            trailingLoading = state.addingUrl == book.bookUrl,
+                            trailingLoading = book.bookUrl in state.addingUrls,
                             trailingEnabled = !inShelf,
                             onTrailing = { viewModel.addToShelf(book) },
                             onClick = { onOpenPreview(listOf(book)) },

@@ -1,5 +1,9 @@
 package com.radium.inkwell.ui.explore
 
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collectLatest
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.radium.inkwell.core.source.BookSourceEngine
@@ -18,6 +22,15 @@ import kotlinx.coroutines.launch
 
 data class ExploreSource(val id: String, val name: String, val categories: List<String>)
 
+/** 发现页列表里一本书的标识：列表按它做 key，合并分页也按它去重 —— 两处必须是同一个 */
+internal val SearchResult.exploreKey: String get() = "$sourceId|$bookUrl"
+
+/** 新的一页里真正新增的那些：与已有列表、以及这一页自身都按 [exploreKey] 去重 */
+internal fun newExploreItems(current: List<SearchResult>, page: List<SearchResult>): List<SearchResult> {
+    val seen = current.mapTo(HashSet()) { it.exploreKey }
+    return page.filter { seen.add(it.exploreKey) }
+}
+
 data class ExploreUiState(
     val sources: List<ExploreSource> = emptyList(),
     val sourceIndex: Int = 0,
@@ -27,7 +40,8 @@ data class ExploreUiState(
     val hasMore: Boolean = false,
     val loading: Boolean = false,
     val loadingMore: Boolean = false,
-    val addingUrl: String? = null,
+    /** 正在加入书架的那几本（bookUrl）。可以同时加好几本 */
+    val addingUrls: Set<String> = emptySet(),
     /** 书架已有书的 (书名,作者) 键；列表据此把已在架的书显示为"已加入" */
     val shelfKeys: Set<Pair<String, String>> = emptySet(),
 ) {
@@ -56,15 +70,40 @@ class ExploreViewModel(
         viewModelScope.launch {
             bookRepo.shelfKeys.collect { keys -> _state.value = _state.value.copy(shelfKeys = keys) }
         }
+        // 书源跟着库走，而不是进页时读一次：从「没有可用的发现源」点「去导入规则」导入回来、
+        // 或在书源管理里启停之后，发现页还停在旧的源列表上（甚至一直是空态）。
+        // 只在启用的源或其规则（id / updatedAt）变了才重读：校验结果写回不该让发现页重载。
         viewModelScope.launch {
-            val rules = sourceRepo.getEnabledRules().filter { it.explore.isNotEmpty() }
-            rules.forEach { ruleCache[it.id] = it }
-            _state.value = _state.value.copy(
-                sources = rules.map { r ->
-                    ExploreSource(r.id, r.name, r.explore.map { it.name })
-                }
-            )
-            if (rules.isNotEmpty()) loadPage(reset = true)
+            sourceRepo.sources
+                .map { list -> list.filter { it.enabled }.map { it.id to it.updatedAt } }
+                .distinctUntilChanged()
+                .collectLatest { reloadSources() }
+        }
+    }
+
+    private suspend fun reloadSources() {
+        val rules = sourceRepo.getEnabledRules().filter { it.explore.isNotEmpty() }
+        ruleCache.clear()
+        rules.forEach { ruleCache[it.id] = it }
+        val sources = rules.map { r -> ExploreSource(r.id, r.name, r.explore.map { it.name }) }
+        val prev = _state.value
+        // 正看着的源还在就留在它上面，别因为别处启停了一个源就把人甩回第一个
+        val keep = sources.indexOfFirst { it.id == prev.currentSource?.id }
+        val sameView = keep >= 0 && prev.categoryIndex < sources[keep].categories.size
+        _state.value = prev.copy(
+            sources = sources,
+            sourceIndex = keep.coerceAtLeast(0),
+            categoryIndex = if (sameView) prev.categoryIndex else 0,
+        )
+        when {
+            sources.isEmpty() -> {
+                loadJob?.cancel()
+                _state.value = _state.value.copy(
+                    books = emptyList(), hasMore = false, loading = false, loadingMore = false,
+                )
+            }
+            // 还是同一个源同一个分类、列表也已经有了：别把用户翻到第几页的内容冲掉
+            !sameView || prev.books.isEmpty() -> loadPage(reset = true)
         }
     }
 
@@ -103,10 +142,17 @@ class ExploreViewModel(
             )
             runCatching { engine.explore(rule, s.categoryIndex, page) }
                 .onSuccess { result ->
+                    // 站点的分类书单在两次翻页之间会错位（「最近更新」这类最常见）：第 2 页开头常常
+                    // 就是第 1 页末尾那几本，一页里也可能把同一本书列两次。列表按 exploreKey 做 key，
+                    // 重复一条就是「Key was already used」崩溃 —— 合并时按同一个 key 去重。
+                    val current = if (reset) emptyList() else _state.value.books
+                    val added = newExploreItems(current, result.items)
                     _state.value = _state.value.copy(
-                        books = if (reset) result.items else _state.value.books + result.items,
+                        books = current + added,
                         page = page,
-                        hasMore = result.hasMore && result.items.isNotEmpty(),
+                        // 一本新书都没带来就当到头了：超出页码时仍回最后一页的站点，
+                        // 会让「加载更多」永远有下一页，列表无休止地追加重复内容
+                        hasMore = result.hasMore && added.isNotEmpty(),
                         loading = false,
                         loadingMore = false,
                     )
@@ -122,24 +168,29 @@ class ExploreViewModel(
         }
     }
 
+    /**
+     * 可以同时加好几本。从前只记一个 addingUrl：A 还在加时点 B，A 先完成就把 B 的转圈也抹掉了。
+     */
     fun addToShelf(result: SearchResult) {
+        val url = result.bookUrl
+        if (url in _state.value.addingUrls) return // 同一行连点
+        _state.update { it.copy(addingUrls = it.addingUrls + url) }
         viewModelScope.launch {
-            _state.value = _state.value.copy(addingUrl = result.bookUrl)
-            val rule = ruleCache[result.sourceId] ?: sourceRepo.getRule(result.sourceId)
-            if (rule == null) {
-                _state.value = _state.value.copy(addingUrl = null)
-                messages.emit("书源不存在")
-                return@launch
+            try {
+                val rule = ruleCache[result.sourceId] ?: sourceRepo.getRule(result.sourceId)
+                if (rule == null) {
+                    messages.emit("书源不存在")
+                    return@launch
+                }
+                netBookRepo.addToShelf(result, rule)
+                    .onSuccess { messages.emit("已加入书架") }
+                    .onFailure {
+                        if (it is CancellationException) throw it
+                        messages.emit("加入失败: ${it.message?.take(80)}")
+                    }
+            } finally {
+                _state.update { it.copy(addingUrls = it.addingUrls - url) }
             }
-            netBookRepo.addToShelf(result, rule)
-                .onSuccess {
-                    _state.value = _state.value.copy(addingUrl = null)
-                    messages.emit("已加入书架")
-                }
-                .onFailure {
-                    _state.value = _state.value.copy(addingUrl = null)
-                    messages.emit("加入失败: ${it.message?.take(80)}")
-                }
         }
     }
 

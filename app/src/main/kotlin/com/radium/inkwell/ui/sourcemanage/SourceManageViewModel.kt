@@ -23,9 +23,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -175,6 +177,7 @@ class SourceManageViewModel(
         checkJob = viewModelScope.launch {
             _checkProgress.value = CheckProgress(0, targets.size)
             var done = 0
+            var bad = 0
             val limiter = Semaphore(CHECK_CONCURRENCY)
             coroutineScope {
                 targets.map { id ->
@@ -182,6 +185,7 @@ class SourceManageViewModel(
                         limiter.withPermit {
                             val check = checkOne(id, opts)
                             sourceRepo.saveCheck(id, check.ok, check.message, check.respondMs)
+                            if (!check.ok) bad++
                             done++
                             _checkProgress.value = CheckProgress(done, targets.size)
                         }
@@ -189,7 +193,8 @@ class SourceManageViewModel(
                 }.awaitAll()
             }
             _checkProgress.value = null
-            val bad = sources.value.count { it.id in targets && it.checkStatus == CheckStatus.FAILED }
+            // 按这一轮的实际结果计数：从前数的是列表流里的 checkStatus，最后几条 saveCheck
+            // 还没回流到 sources 时就少算了失效数
             messages.emit("校验完成：可用 ${targets.size - bad}，失效 $bad")
         }
     }
@@ -374,18 +379,61 @@ class SourceManageViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /** 列表实际显示的书源：搜索 + 筛选 + 分组 + 排序 */
+    /**
+     * 无搜索规则（仅发现页可用）的书源 id。
+     * 规则按 id **逐条**取 —— 不能再对列表里的 json 字段做 map（列表投影已不含 json）。
+     *
+     * 只在书源集合或规则本身变了（id / updatedAt）才重算：校验时每个源 saveCheck 一次都会让
+     * 列表流重发，从前每发一次就把几百条规则重新解码一遍。
+     * 必须声明在 [visibleSources] 之前 —— 它是后者 combine 的一路输入，构造期就要取到。
+     */
+    val exploreOnlyIds: StateFlow<Set<String>> = sourceRepo.sources
+        .map { list -> list.map { it.id to it.updatedAt } }
+        .distinctUntilChanged()
+        .mapLatest { list ->
+            list.mapNotNull { (id, _) ->
+                val rule = sourceRepo.getRule(id) ?: return@mapNotNull null
+                id.takeIf { rule.search == null }
+            }.toSet()
+        }
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    /**
+     * 列表实际显示的书源：搜索 + 筛选 + 分组 + 排序。
+     * [exploreOnlyIds] 也是一路输入：从前只在筛选时读它的当前值，「仅发现页」在它算完之前点下去
+     * （或导入之后）列表就一直是空的 / 旧的，直到别的条件变一下。
+     */
     val visibleSources: StateFlow<List<BookSourceListItem>> =
         kotlinx.coroutines.flow.combine(
-            sources, _query, _filter, _sort, _group,
-        ) { list, q, f, o, g ->
+            sources, _query, _filter, _sort, _group, exploreOnlyIds,
+        ) { args ->
+            @Suppress("UNCHECKED_CAST")
+            val list = args[0] as List<BookSourceListItem>
+            val q = args[1] as String
+            val f = args[2] as SourceFilter
+            val o = args[3] as SourceSort
+            val g = args[4] as String?
+            @Suppress("UNCHECKED_CAST")
+            val exploreOnly = args[5] as Set<String>
             list.asSequence()
                 .filter { matchesQuery(it, q) }
-                .filter { matchesFilter(it, f) }
+                .filter { matchesFilter(it, f, exploreOnly) }
                 .filter { g == null || it.groupName.split(',', '，').any { s -> s.trim() == g } }
                 .sortedWith(sourceComparator(o))
                 .toList()
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    init {
+        // 多选只对**看得见的**书源生效：选了几个再改搜索词/筛选/分组，看不见的还留在选中集合里，
+        // 「删除 N 个」就会连它们一起删掉。可见列表一变就把选中收窄。
+        viewModelScope.launch {
+            visibleSources.collect { visible ->
+                val ids = visible.mapTo(HashSet()) { it.id }
+                _selected.update { sel -> if (ids.containsAll(sel)) sel else sel.filterTo(LinkedHashSet()) { it in ids } }
+            }
+        }
+    }
 
     private fun matchesQuery(s: BookSourceListItem, q: String): Boolean {
         if (q.isBlank()) return true
@@ -393,32 +441,18 @@ class SourceManageViewModel(
         return s.name.contains(k, true) || s.id.contains(k, true) || s.groupName.contains(k, true)
     }
 
-    private fun matchesFilter(s: BookSourceListItem, f: SourceFilter): Boolean = when (f) {
+    private fun matchesFilter(s: BookSourceListItem, f: SourceFilter, exploreOnly: Set<String>): Boolean = when (f) {
         SourceFilter.ALL -> true
         SourceFilter.ENABLED -> s.enabled
         SourceFilter.DISABLED -> !s.enabled
         SourceFilter.FAILED -> s.checkStatus == CheckStatus.FAILED
         SourceFilter.UNCHECKED -> s.checkStatus == CheckStatus.UNCHECKED
-        SourceFilter.EXPLORE_ONLY -> s.id in exploreOnlyIds.value
+        SourceFilter.EXPLORE_ONLY -> s.id in exploreOnly
     }
 
     val failedCount: StateFlow<Int> = sources
         .map { list -> list.count { it.checkStatus == CheckStatus.FAILED } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
-
-    /**
-     * 无搜索规则（仅发现页可用）的书源 id。
-     * 规则按 id **逐条**取 —— 不能再对列表里的 json 字段做 map（列表投影已不含 json）。
-     */
-    val exploreOnlyIds: StateFlow<Set<String>> = sourceRepo.sources
-        .mapLatest { list ->
-            list.mapNotNull { item ->
-                val rule = sourceRepo.getRule(item.id) ?: return@mapNotNull null
-                item.id.takeIf { rule.search == null }
-            }.toSet()
-        }
-        .flowOn(Dispatchers.IO)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
     /** 一次性提示：用事件流而非 StateFlow，避免相同内容的连续提示被去重吞掉 */
     val messages = MessageBus()

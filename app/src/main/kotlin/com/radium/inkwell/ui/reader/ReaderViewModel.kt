@@ -256,6 +256,15 @@ class ReaderViewModel(
     private var source: ReaderBookSource? = null
     private var position = ReadPosition(0, 0)
     /**
+     * 用户要去、但还没显示出来的位置（进书/翻章/跳目录都经 [showPosition] 记下，[showPage] 成功即清）。
+     *
+     * [position] 只在 showPage **成功之后**才更新：从第 N 章翻向 N+1 失败时，它还停在 N。
+     * 重试、自动换源、排到一半换了视口的重排，要的都是这一个 —— 拿 position 去，
+     * 重试会悄悄重载一遍读得出来的第 N 章；自动换源会拿第 N 章去探测（必然"成功"），
+     * 换完再按 N 对齐，把人送回刚读完那章的开头，还白白用掉本次会话唯一一次自动换源。
+     */
+    private var pendingTarget: ReadPosition? = null
+    /**
      * [loadSession] 是否走完。为 false 时 [source] 可能是 null、是换源前已关闭的旧源、或是零章的源，
      * 都不能拿来重排 —— [retry] 据此决定从进书重来还是只重排当前章。
      */
@@ -363,8 +372,12 @@ class ReaderViewModel(
             }
             // 补抓之后仍可能越界（离线抓不到目录、本地书文件换成了更短的版本）。越界时
             // ensurePaginated 静默返回 null，报「第 N 章读不出来」，重试还是同一个位置 —— 死路。
+            progressHeld = false
             if (position.chapterIndex !in 0 until src.chapterCount) {
                 position = ReadPosition(position.chapterIndex.coerceIn(0, src.chapterCount - 1), 0)
+                // 网络书走到这里，是同步来的进度比本机目录新、补抓又没成：夹出来的只是占位，别写回去。
+                // 本地书是文件换成了更短的版本，目录就是权威，夹完照常保存
+                progressHeld = b.type == BookType.NET
             }
             _state.value = _state.value.copy(
                 bookTitle = b.title,
@@ -397,7 +410,7 @@ class ReaderViewModel(
         } catch (e: Exception) {
             _state.value = _state.value.copy(loading = false, error = e.message ?: "打开书籍失败")
             // 书源被删了、目录拉不到 —— 这两种进书就废的情况，Legado 原生也自动换源
-            maybeAutoChangeSource(e.message ?: "打开书籍失败")
+            maybeAutoChangeSource(e.message ?: "打开书籍失败", target = position)
         }
     }
 
@@ -438,12 +451,14 @@ class ReaderViewModel(
         paginateJob = viewModelScope.launch {
             engineMutex.withLock {
                 paginated.clear()
-                showPosition(position)
+                // 加载途中旋转/改字号：用户点的那一章还没出来，重排要接着去那一章，别退回旧章
+                showPosition(pendingTarget ?: position)
             }
         }
     }
 
     fun flip(direction: FlipDirection) {
+        progressHeld = false
         val s = _state.value
         val result = paginated[s.chapterIndex] ?: return
         val chapter = result.chapter
@@ -473,6 +488,7 @@ class ReaderViewModel(
     fun gotoChapter(index: Int, charOffset: Int = 0) {
         val count = _state.value.chapterCount
         if (index !in 0 until count) return
+        progressHeld = false
         _state.value = _state.value.copy(loading = paginated[index] == null)
         viewModelScope.launch {
             engineMutex.withLock {
@@ -505,6 +521,7 @@ class ReaderViewModel(
     }
 
     fun seekToPercent(percent: Float) {
+        progressHeld = false
         val s = _state.value
         val chapter = paginated[s.chapterIndex]?.chapter ?: return
         val offset = (percent.coerceIn(0f, 1f) * chapter.totalChars).toInt()
@@ -565,7 +582,11 @@ class ReaderViewModel(
         }
     }
 
-    private fun stopAutoFlip() {
+    /**
+     * 也由阅读页在 ON_STOP 时调用：锁屏、切走之后循环还在 viewModelScope 里按点发翻页请求，
+     * 回来已经翻过几百页、进度跟着存了，后台还白抓了一路章节。
+     */
+    fun stopAutoFlip() {
         autoFlipJob?.cancel()
         autoFlipJob = null
         _state.value = _state.value.copy(autoFlipping = false)
@@ -585,7 +606,8 @@ class ReaderViewModel(
             }
             engineMutex.withLock {
                 paginated.clear()
-                showPosition(position)
+                // 重试的是**刚才失败的那一章**，不是上一章
+                showPosition(pendingTarget ?: position)
             }
         }
     }
@@ -602,7 +624,7 @@ class ReaderViewModel(
                 if (first) { first = false; return@collect } // 首帧是初始值，别白重排一次
                 engineMutex.withLock {
                     paginated.clear()
-                    showPosition(position)
+                    showPosition(pendingTarget ?: position)
                 }
             }
         }
@@ -918,7 +940,7 @@ class ReaderViewModel(
      * 必须**异步启动**：调用点（ensurePaginated / ensureScroll）是在 engineMutex 里跑的，
      * 而换完源要走 loadSession，它也要拿这把锁 —— 同步调用就是自锁。
      */
-    private fun maybeAutoChangeSource(cause: String) {
+    private fun maybeAutoChangeSource(cause: String, target: ReadPosition) {
         val b = book ?: return
         if (b.type != BookType.NET) return // 本地书没有"源"可换
         if (autoChangeUsed || autoChangeJob?.isActive == true) return
@@ -927,7 +949,8 @@ class ReaderViewModel(
             if (!appPrefs.autoChangeSource.first()) return@launch
             autoChangeUsed = true
 
-            val chapterTitle = chapterDao.get(bookId, position.chapterIndex)?.title
+            // 探测**失败的那一章**：拿上一章（position）去探，任何能读的源都会"通过"
+            val chapterTitle = chapterDao.get(bookId, target.chapterIndex)?.title
             _state.value = _state.value.copy(
                 autoChanging = true,
                 autoChangeDone = 0,
@@ -938,7 +961,7 @@ class ReaderViewModel(
                 title = b.title,
                 author = b.author.orEmpty(),
                 exclude = b.sourceId,
-                target = AutoSourceSwitcher.Target(position.chapterIndex, chapterTitle),
+                target = AutoSourceSwitcher.Target(target.chapterIndex, chapterTitle),
                 checkAuthor = appPrefs.changeSourceCheckAuthor.first(),
                 bookHits = bookHits(),
                 onProgress = { done, total ->
@@ -959,13 +982,18 @@ class ReaderViewModel(
             // 会把**旧源的正文**写进新源的缓存目录，并给新目录的同序号章节打上"已缓存"。
             stopPrefetch()
 
+            // 撤销退回的是「原来读到的那个字」—— 最后真正显示出来的 position，而不是没读出来的目标章
             val snapshot = b.sourceId?.let { sid ->
                 b.bookUrl?.let { url ->
                     UndoSnapshot(sid, url, NetBookRepository.ReadAnchor(position.chapterIndex, position.charOffset))
                 }
             }
 
-            netBookRepo.changeSource(b, probe.result, probe.rule)
+            netBookRepo.changeSource(
+                b, probe.result, probe.rule,
+                // 库里存的进度还是上一章；按它对齐，换完源就落回刚读完那章 —— 要按目标章对齐
+                alignFrom = NetBookRepository.ReadAnchor(target.chapterIndex, 0),
+            )
                 .onSuccess {
                     undoSnapshot = snapshot
                     _state.value = _state.value.copy(
@@ -1060,7 +1088,9 @@ class ReaderViewModel(
     /** 定位到指定位置：必要时加载+分页该章，并预取相邻章 */
     private suspend fun showPosition(target: ReadPosition) {
         // 这条永远是"用户在等的那一章"（进书、翻章、跳目录、重试都走这里），预取不走这里
+        pendingTarget = target
         val src = source
+        val startSpec = spec
         val result = ensurePaginated(
             target.chapterIndex,
             userFacing = true,
@@ -1072,8 +1102,10 @@ class ReaderViewModel(
             // 但环境已就绪却仍拿不到结果（如目录为空导致章号越界），就是真读不出来：
             // 必须让 loading 落地，否则又是一个"永远转圈且没有出口"。
             // 加载期间换了源也不报：ensurePaginated 是有意丢掉旧源结果，新会话随后会自己再定位一次。
+            // 加载期间换了视口（旋转、改字号）同理：结果按旧 spec 排的被丢掉了，onLayoutReady
+            // 排着队，拿到锁就会按 [pendingTarget] 重来 —— 这里报错只会闪一下假的「读不出来」。
             if (src != null && source === src && facade != null && spec != null &&
-                _state.value.error == null
+                spec == startSpec && _state.value.error == null
             ) {
                 Log.w(TAG, "第 ${target.chapterIndex} 章取不到分页结果，且排版环境已就绪")
                 _state.value = _state.value.copy(
@@ -1174,7 +1206,7 @@ class ReaderViewModel(
             Log.w(TAG, "第 $chapterIndex 章滚动排版失败（userFacing=$userFacing）", e)
             if (userFacing) {
                 _state.value = _state.value.copy(loading = false, error = "章节加载失败: ${e.message}")
-                maybeAutoChangeSource("章节加载失败: ${e.message}")
+                maybeAutoChangeSource("章节加载失败: ${e.message}", target = ReadPosition(chapterIndex, 0))
             }
             null
         }
@@ -1358,6 +1390,7 @@ class ReaderViewModel(
             ?.takeIf { it != Int.MAX_VALUE && it >= page.spec.startCharOffset && it < page.spec.endCharOffset }
             ?: page.spec.startCharOffset
         position = ReadPosition(chapterIndex, offset)
+        pendingTarget = null
         val (prev, next) = neighborPages(chapterIndex, pageIndex)
         _state.value = _state.value.copy(
             chapterIndex = chapterIndex,
@@ -1429,7 +1462,12 @@ class ReaderViewModel(
                                 } else {
                                     partial.chapter.pageIndexFor(notifyAfterChar)
                                 }
-                                showPage(chapterIndex, pageIdx, keepOffset = notifyAfterChar)
+                                // 这个回调跑在 Default 上：showPage 读改写 _state / position / 预取 Job，
+                                // 直接在这里调就是和主线程上的写入赛跑。投递回主线程 —— 它排在本次
+                                // 排版完成后的那次 showPage 之前，先出的仍是这一屏
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    showPage(chapterIndex, pageIdx, keepOffset = notifyAfterChar)
+                                }
                             }
                         },
                     )
@@ -1457,7 +1495,10 @@ class ReaderViewModel(
             Log.w(TAG, "第 $chapterIndex 章分页失败（userFacing=$userFacing）", e)
             if (userFacing) {
                 _state.value = _state.value.copy(loading = false, error = "章节加载失败: ${e.message}")
-                maybeAutoChangeSource("章节加载失败: ${e.message}")
+                maybeAutoChangeSource(
+                    "章节加载失败: ${e.message}",
+                    target = ReadPosition(chapterIndex, notifyAfterChar),
+                )
             }
             null
         }
@@ -1552,6 +1593,14 @@ class ReaderViewModel(
     /** 试读选择不加入后不要再把进度写回 —— 那一行马上要被清掉 */
     private var skipProgressFlush = false
 
+    /**
+     * 库里的进度超出本机目录、补抓目录又失败（离线、书源抽风）时，[loadSession] 把位置夹到了末章开头。
+     * 那只是个**占位**，不是用户读到的地方：从前照样被 showPage / 退后台写回库里，还带着新的 readAt ——
+     * 同步按 readAt 取进度，这个倒退就赢过另一台设备的真实进度、扩散到所有设备。
+     * 用户真正翻页 / 跳章之后才恢复写入。
+     */
+    private var progressHeld = false
+
     /** 试读结束：正式上架。调用方等它完成再退页，避免和丢弃竞态。 */
     suspend fun commitToShelf() = withContext(NonCancellable) {
         val p = position
@@ -1568,7 +1617,7 @@ class ReaderViewModel(
     }
 
     private fun saveProgress() {
-        if (skipProgressFlush) return
+        if (skipProgressFlush || progressHeld) return
         saveProgressJob?.cancel()
         saveProgressJob = viewModelScope.launch {
             delay(PROGRESS_DEBOUNCE_MS)
@@ -1577,7 +1626,7 @@ class ReaderViewModel(
     }
 
     private suspend fun persistProgress() {
-        if (skipProgressFlush) return
+        if (skipProgressFlush || progressHeld) return
         val p = position
         withContext(Dispatchers.IO + NonCancellable) {
             bookRepo.saveProgress(bookId, p.chapterIndex, p.charOffset)
@@ -1586,7 +1635,7 @@ class ReaderViewModel(
 
     /** 离开阅读页 / 进后台时立刻刷盘，避免防抖窗口里进程被杀丢进度 */
     fun flushProgress() {
-        if (skipProgressFlush) return
+        if (skipProgressFlush || progressHeld) return
         saveProgressJob?.cancel()
         val p = position
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO + NonCancellable).launch {

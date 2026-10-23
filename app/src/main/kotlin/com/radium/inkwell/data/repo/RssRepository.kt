@@ -1,5 +1,7 @@
 package com.radium.inkwell.data.repo
 
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import com.radium.inkwell.core.source.SourceHttpClient
 import com.radium.inkwell.core.source.rss.LegadoRssConverter
 import com.radium.inkwell.core.source.rss.RssSourceRule
@@ -49,7 +51,8 @@ class RssRepository(
         if (!LegadoRssConverter.looksLikeLegadoRss(trimmed)) {
             return RssImportReport(0, 0, listOf("不是订阅源：既不是 legado 订阅源 JSON，也不是一个 feed 地址"))
         }
-        val result = LegadoRssConverter.convert(trimmed)
+        // 转换整份订阅源合集是纯 CPU 活，调用方在主线程上
+        val result = withContext(Dispatchers.Default) { LegadoRssConverter.convert(trimmed) }
         val existing = dao.getAll().associateBy { it.id }
         val now = System.currentTimeMillis()
         var added = 0
@@ -61,7 +64,12 @@ class RssRepository(
                 // 重复导入保留用户的启用/禁用与排序
                 enabled = existing[c.rule.id]?.enabled ?: c.rule.enabled,
                 sortOrder = existing[c.rule.id]?.sortOrder ?: 0,
-                updatedAt = now,
+                // 同书源导入：原样重导不算修改，盖 now 会让本机旧的启停在 WebDAV 合并里赢过别的设备；
+                // 墓碑被重新导入是「加回来」，要盖新时间戳
+                updatedAt = existing[c.rule.id]
+                    ?.takeIf { !it.deleted && it.sourceJson == c.sourceJson }
+                    ?.updatedAt
+                    ?: now,
             )
         }
         dao.upsertAll(toWrite)

@@ -1,5 +1,6 @@
 package com.radium.inkwell.data.repo
 
+import java.io.File
 import com.radium.inkwell.core.source.BookSourceTypes
 import com.radium.inkwell.core.webdav.BackupBook
 import com.radium.inkwell.core.webdav.BackupCodec
@@ -24,6 +25,8 @@ import com.radium.inkwell.data.prefs.ReaderPrefs
 import com.radium.inkwell.data.prefs.WebDavPrefs
 import com.radium.inkwell.data.prefs.exportForBackup
 import com.radium.inkwell.data.prefs.importFromBackup
+import com.radium.inkwell.util.LocalNetworkAccess
+import com.radium.inkwell.util.LocalNetworkPermissionMissing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -45,6 +48,7 @@ class WebDavRepository(
     private val readerPrefs: ReaderPrefs,
     private val appPrefs: AppPrefs,
     private val replaceRules: ReplaceRuleRepository,
+    private val localNetwork: LocalNetworkAccess,
 ) {
     private companion object {
         const val DIR = "inkwell"
@@ -64,7 +68,11 @@ class WebDavRepository(
 
     /** 双向同步：GET 远端 → 字段级 LWW 合并 → 写回本地 → PUT 合并结果 */
     suspend fun sync(): Result<String> = try {
-        syncMutex.withLock { Result.success(syncLocked()) }
+        // 备份里装着每个书源的完整 JSON，几百个源就是几 MB：gzip、整份编解码、逐条解析书源类型
+        // 都是重活，而设置页的「立即同步」是从 viewModelScope（主线程）调进来的
+        withContext(Dispatchers.IO) {
+            syncMutex.withLock { Result.success(syncLocked()) }
+        }
     } catch (e: CancellationException) {
         // 退到后台的自动同步被进程回收、或用户离开设置页 —— 这是取消，不是「同步失败」
         throw e
@@ -76,6 +84,9 @@ class WebDavRepository(
         val config = prefs.config.first()
         check(config.isConfigured) { "尚未配置 WebDAV" }
         val url = if (OfficialWebDav.isLegacyDav(config.url)) OfficialWebDav.DAV else config.url
+        // 局域网 NAS 缺 Android 17 的局域网权限时，连接不报错、只会挂到超时 ——
+        // 先拦下来，给一句看得懂的话（设置页据此弹授权）。后台自动同步也不必白等十几秒
+        if (localNetwork.isBlocked(url)) throw LocalNetworkPermissionMissing()
         val client = WebDavClient(url, config.username, config.password)
 
         // 先建目录再读：首次同步时 inkwell/ 还不存在，直接 GET 备份文件，
@@ -83,11 +94,14 @@ class WebDavRepository(
         // MKCOL 是幂等的（已存在返回 405，客户端当成功）。
         client.mkcol(DIR)
 
-        val local = buildLocalPayload()
         // 远端文件损坏（上传中断留半截、被别的客户端写坏）时 decode 会抛异常。若让它把整个 sync
         // 拖垮，PUT 永远执行不到 → 损坏文件永远修不好、同步永久瘫痪。这里把损坏视作「远端没有可用备份」，
         // 照常用本地覆盖上去，下一次同步就自愈了。
         val remote = client.get(BACKUP)?.let { runCatching { BackupCodec.decode(it) }.getOrNull() }
+        // 本地快照在下载**之后**再拍：备份动辄几 MB，冷启动同步下载的那几秒里用户删书、隐藏、
+        // 改分组，按下载前的快照合并会把这些修改原样写回去（删掉的书复活）。
+        // 拍完到写回之间仍有一小段合并耗时，那段由 applyBooks / applySources 按时间戳兜住。
+        val local = buildLocalPayload()
 
         val toUpload: BackupPayload
         var applied = 0
@@ -178,11 +192,19 @@ class WebDavRepository(
         // 缓存是文件 IO，放事务外先做；目录删除跟书行更新同一事务。
         val resourced = merged.changedBooks.filter { b ->
             val existing = bookDao.getById(b.id) ?: return@filter false
-            existing.type == BookType.NET &&
+            // 元数据不会被采纳（本地在快照之后又改过，见 applyBooks）就谈不上换源
+            existing.type == BookType.NET && b.updatedAt > existing.updatedAt &&
                 (existing.sourceId != b.sourceId || existing.bookUrl != b.bookUrl)
         }.map { it.id }.toSet()
         if (resourced.isNotEmpty()) {
             withContext(Dispatchers.IO) { resourced.forEach { cache.clear(it) } }
+        }
+        // 别的设备删掉的书：本地删书（BookRepository.deleteBook）会顺手清掉导入的书文件、本地封面、
+        // 正文缓存和目录行，同步过来的删除从前只打了墓碑 —— 这些东西就永远躺在磁盘上，没有任何入口能清。
+        // 先记下要清的（事务里会改掉 deleted），目录行随事务删，文件 IO 放在事务之后
+        val remotelyDeleted = merged.changedBooks.mapNotNull { b ->
+            val existing = bookDao.getById(b.id) ?: return@mapNotNull null
+            existing.takeIf { b.deleted && !it.deleted && b.updatedAt > it.updatedAt }
         }
 
         // 几十条逐行写 + 三张表：中途被杀不留半套。远端设置的导入是 DataStore，在事务外。
@@ -207,6 +229,16 @@ class WebDavRepository(
                 }
             )
         }
+        if (remotelyDeleted.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                remotelyDeleted.forEach { book ->
+                    book.localPath?.let { File(it).delete() }
+                    // 网络书的 coverPath 存的是远程 URL，不是文件
+                    if (book.type != BookType.NET) book.coverPath?.let { File(it).delete() }
+                    cache.clear(book.id)
+                }
+            }
+        }
         merged.readerSettings?.let { readerPrefs.importFromBackup(it) }
         merged.appSettings?.let { appPrefs.importFromBackup(it) }
     }
@@ -216,23 +248,37 @@ class WebDavRepository(
             val existing = bookDao.getById(b.id)
             if (existing != null) {
                 val sourceChanged = b.id in resourced
-                if (sourceChanged) chapterDao.deleteByBook(b.id)
-                bookDao.update(
+                val deletedRemotely = b.deleted && !existing.deleted && b.updatedAt > existing.updatedAt
+                if (sourceChanged || deletedRemotely) chapterDao.deleteByBook(b.id)
+                // 合并只在远端时间戳**严格更大**时才取远端那一份（相等算本地）。拿事务里的最新行再比一次：
+                // 本地在拍快照之后又改过（时间戳已经比合并结果新），那一块就保留本地的 ——
+                // 否则用户刚做的修改被合并结果里的旧值盖回去，还会随下一次上传扩散到所有设备。
+                val takeMeta = b.updatedAt > existing.updatedAt
+                val takeProgress = b.readAt > existing.readAt
+                val meta = if (takeMeta) {
                     existing.copy(
                         title = b.title, author = b.author, intro = b.intro,
-                        // 只补空，不覆盖：本地书这一列是有效的本机文件路径，
-                        // 而远端对本地书永远给 null —— 拿 null 盖上去等于把封面弄丢。
-                        coverPath = existing.coverPath ?: b.coverUrl,
                         sourceId = b.sourceId, bookUrl = b.bookUrl, tocUrl = b.tocUrl,
-                        // 换了源就按新源的章节数来，旧源的更大值对新目录没有意义
-                        totalChapters = if (sourceChanged) b.totalChapters else maxOf(existing.totalChapters, b.totalChapters),
-                        readChapterIndex = b.readChapterIndex, readCharOffset = b.readCharOffset,
-                        readAt = b.readAt, updatedAt = b.updatedAt,
+                        updatedAt = b.updatedAt,
                         groupName = b.groupName, hidden = b.hidden,
                         deleted = b.deleted,
                         // 备份里的都是真正上过架的书（或墓碑）。本地若还是试读行，
                         // 被远端一份活书盖过来时必须上架，否则书架上永远看不见。
                         inShelf = !b.deleted,
+                    )
+                } else {
+                    existing
+                }
+                bookDao.update(
+                    meta.copy(
+                        // 只补空，不覆盖：本地书这一列是有效的本机文件路径，
+                        // 而远端对本地书永远给 null —— 拿 null 盖上去等于把封面弄丢。
+                        coverPath = existing.coverPath ?: b.coverUrl,
+                        // 换了源就按新源的章节数来，旧源的更大值对新目录没有意义
+                        totalChapters = if (sourceChanged) b.totalChapters else maxOf(existing.totalChapters, b.totalChapters),
+                        readChapterIndex = if (takeProgress) b.readChapterIndex else existing.readChapterIndex,
+                        readCharOffset = if (takeProgress) b.readCharOffset else existing.readCharOffset,
+                        readAt = if (takeProgress) b.readAt else existing.readAt,
                     )
                 )
             } else {
@@ -264,6 +310,8 @@ class WebDavRepository(
             // 校验结果（checkStatus/checkMessage/respondTime/checkedAt）是本地专属、不跨设备同步的列 ——
             // 整行 REPLACE 会把它们清空。读旧行、只覆盖同步字段（含分组），本地校验结果原样保留。
             val existing = sourceDao.getById(s.id)
+            // 同 applyBooks：本地在拍快照之后又改过（启停/分组/删除），保留本地的
+            if (existing != null && s.updatedAt <= existing.updatedAt) return@forEach
             sourceDao.upsert(
                 (existing ?: BookSourceEntity(id = s.id, name = s.name, json = s.json, updatedAt = s.updatedAt))
                     .copy(

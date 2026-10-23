@@ -141,6 +141,64 @@ class BookSourceImportTest {
         assertEquals(false, dao.store["https://a.com"]!!.enabled)
     }
 
+    private fun groupedSource(group: String, search: String = "/s?q={{key}}") = """
+    {
+      "bookSourceUrl": "https://g.com",
+      "bookSourceName": "分组站",
+      "bookSourceGroup": "$group",
+      "searchUrl": "$search",
+      "ruleSearch": { "bookList": "class.item", "name": "tag.h3@text", "bookUrl": "tag.a@href" }
+    }
+    """.trimIndent()
+
+    /**
+     * 同一份规则原样再导一遍不是「修改」—— 盖了新时间戳，这一行就会带着本机的旧启停/分组
+     * 在 WebDAV 合并（按 updatedAt 做 LWW）里赢过别的设备刚做的修改。
+     */
+    @Test
+    fun `原样重导不刷新 updatedAt，规则变了才刷新`() = runTest {
+        val dao = FakeDao()
+        val repo = BookSourceRepository(dao, FakeHitDao())
+        repo.importJson(groupedSource("玄幻")).getOrThrow()
+        dao.store["https://g.com"] = dao.store["https://g.com"]!!.copy(updatedAt = 1_000)
+
+        repo.importJson(groupedSource("玄幻")).getOrThrow()
+        assertEquals(1_000, dao.store["https://g.com"]!!.updatedAt)
+
+        repo.importJson(groupedSource("玄幻", search = "/search?q={{key}}")).getOrThrow()
+        assertTrue(dao.store["https://g.com"]!!.updatedAt > 1_000)
+    }
+
+    @Test
+    fun `墓碑被重新导入算加回来，要盖新时间戳`() = runTest {
+        val dao = FakeDao()
+        val repo = BookSourceRepository(dao, FakeHitDao())
+        repo.importJson(groupedSource("玄幻")).getOrThrow()
+        repo.delete("https://g.com")
+        dao.store["https://g.com"] = dao.store["https://g.com"]!!.copy(updatedAt = 1_000)
+
+        repo.importJson(groupedSource("玄幻")).getOrThrow()
+        val row = dao.store["https://g.com"]!!
+        assertEquals(false, row.deleted)
+        assertTrue(row.updatedAt > 1_000)
+    }
+
+    @Test
+    fun `用户改过的分组在重导时保留，没改过的跟着新规则走`() = runTest {
+        val dao = FakeDao()
+        val repo = BookSourceRepository(dao, FakeHitDao())
+        repo.importJson(groupedSource("玄幻")).getOrThrow()
+
+        // 没改过：作者在新版里把分组改成「都市」，用户拿到新分组
+        repo.importJson(groupedSource("都市")).getOrThrow()
+        assertEquals("都市", dao.store["https://g.com"]!!.groupName)
+
+        // 用户自己整理成「常用」：再导哪一版都不该被冲掉
+        repo.setGroup(listOf("https://g.com"), "常用")
+        repo.importJson(groupedSource("言情")).getOrThrow()
+        assertEquals("常用", dao.store["https://g.com"]!!.groupName)
+    }
+
     /** 非小说书源（音频/漫画/文件/视频）按 bookSourceType 过滤，计入 skipped，不入库 */
     @Test
     fun `非小说书源被过滤掉`() = runTest {

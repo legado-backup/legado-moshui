@@ -54,7 +54,13 @@ class Paginator(private val measurer: TextMeasureFacade) {
         val partialCb = onPartial.takeIf { notifyAfterChar != Int.MAX_VALUE }
 
         fun snapshot(complete: Boolean) = Result(
-            PaginatedChapter(chapterIndex, title, pages.toList(), charOffset),
+            // 中途结果的总字数按「已封的页覆盖到哪」算。charOffset 是**正在排的那一段**的起点：
+            // 目标偏移落在一个跨页的长段里（大字号、文学类 EPUB 很常见）时，pageIndexFor 会把目标
+            // 夹到这段开头之前 —— 先出的是前一页、还顺手把进度挪了过去，排完再跳回来。
+            PaginatedChapter(
+                chapterIndex, title, pages.toList(),
+                if (complete) charOffset else maxOf(charOffset, pages.lastOrNull()?.endCharOffset ?: 0),
+            ),
             // 完整结果不再拷测量表：paginate 返回后不会再往里写。中途回调必须拷一份，
             // 否则 Default 线程继续 put 时，主线程若正在遍历会 ConcurrentModification。
             if (complete) measured else HashMap(measured),

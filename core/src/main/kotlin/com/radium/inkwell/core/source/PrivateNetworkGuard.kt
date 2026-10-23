@@ -89,6 +89,42 @@ class PrivateNetworkGuardInterceptor : Interceptor {
 }
 
 /**
+ * [host] 是否指向内网。给拿不到「实际连上的 IP」的通道用 —— WebView 的连接由 Chromium 自己建，
+ * OkHttp 那两道拦截（DNS 层只放行公网地址、网络拦截器查真正连上的 IP）都装不上去，只能事先按主机判。
+ *
+ * 因此从严：域名解析出的地址**任一**落在内网就算（OkHttp 那边是只把公网那些交出去，这里做不到挑）。
+ * 解析失败不算内网 —— 连接自己会失败，不必在这里抢先下结论。
+ * 仍挡不住 DNS 重绑定（这里解析给公网、Chromium 连的时候再解析到内网）；那需要接管 WebView 的
+ * 全部请求，代价是 POST 体、Cookie 语义都得自己重做，目前不值得。
+ */
+fun isPrivateNetworkHost(host: String, dns: Dns = Dns.SYSTEM): Boolean {
+    if (isPrivateNetworkLiteral(host)) return true
+    val h = host.trim('[', ']')
+    if (h.isEmpty() || ipLiteralOf(h) != null) return false // 公网 IP 字面量，上面已经判过
+    return try {
+        dns.lookup(h).any { it.isPrivate() }
+    } catch (_: UnknownHostException) {
+        false
+    }
+}
+
+/**
+ * 不解析 DNS 就能下结论的那部分：内网 IP 字面量、`localhost`、`.local`。
+ * 主线程上（WebView 的 shouldOverrideUrlLoading）只能判到这一步 —— 那里做 DNS 会直接抛
+ * NetworkOnMainThreadException。
+ */
+fun isPrivateNetworkLiteral(host: String): Boolean {
+    val h = host.trim('[', ']')
+    if (h.equals("localhost", ignoreCase = true) ||
+        h.endsWith(".localhost", ignoreCase = true) ||
+        h.endsWith(".local", ignoreCase = true)
+    ) {
+        return true
+    }
+    return ipLiteralOf(h)?.isPrivate() == true
+}
+
+/**
  * host 是 IP 字面量时返回对应地址，否则 null。判定与 OkHttp 的 `canParseAsIpAddress` 一致
  * （含冒号的当 IPv6，纯数字和点的当 IPv4 —— 包括 `2130706433` 这种单整数写法），
  * 否则会出现「OkHttp 当 IP 直连、这里当域名放过」的缝。

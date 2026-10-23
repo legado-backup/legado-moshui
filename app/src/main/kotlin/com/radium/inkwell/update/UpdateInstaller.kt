@@ -34,7 +34,9 @@ class UpdateInstaller(private val http: OkHttpClient) {
         val dir = File(cacheDir, "updates").apply { mkdirs() }
         // 清掉上次的残留：避免占空间，也避免装到半截的旧包
         dir.listFiles()?.forEach { it.delete() }
-        val out = File(dir, install.filename)
+        // 文件名来自服务端：`../../databases/inkwell.db` 这种会跳出 updates/，下面先截断写入、
+        // 校验不过再删 —— 应用私有目录里任何文件都能被覆盖或删掉。只取最后一段，拿不到就用固定名
+        val out = File(dir, File(install.filename).name.takeIf { it.isNotBlank() && it != ".." } ?: "inkwell-update.apk")
 
         val req = Request.Builder().url(install.url).build()
         http.newCall(req).execute().use { resp ->

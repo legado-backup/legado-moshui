@@ -29,6 +29,18 @@ class LegadoRssConverterTest {
         assertEquals("热门", rule.sorts[1].title)
     }
 
+    /** Legado 的分类分隔符除了换行还有 `&&`：写成一行的源从前只剩一个拼坏了地址的分类 */
+    @Test
+    fun `分类也按 && 拆开`() {
+        val legado = """
+        [{"sourceName":"某站","sourceUrl":"https://x.com",
+          "sortUrl":"最新::https://x.com/new&&热门::https://x.com/hot"}]
+        """.trimIndent()
+        val rule = LegadoRssConverter.convert(legado).converted.single().rule
+        assertEquals(listOf("https://x.com/new", "https://x.com/hot"), rule.sorts.map { it.url })
+        assertEquals(listOf("最新", "热门"), rule.sorts.map { it.title })
+    }
+
     /** 没有列表规则是**常态**：标准 XML feed 填个地址就该能用 */
     @Test
     fun `纯 feed 源（没有任何规则）照样转得进来`() {

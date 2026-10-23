@@ -19,6 +19,9 @@ import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import com.radium.inkwell.core.source.guardPrivateNetwork
+import okhttp3.OkHttpClient
 import okio.Path.Companion.toOkioPath
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.context.startKoin
@@ -94,6 +97,12 @@ class InkwellApp : Application(), SingletonImageLoader.Factory {
                     .directory(cacheDir.resolve("coil").toOkioPath())
                     .maxSizeBytes(50L * 1024 * 1024)
                     .build()
+            }
+            .components {
+                // 封面地址来自书源（第三方），同样不许打到内网。从前走 Coil 默认的 OkHttp 客户端：
+                // coverUrl 写成 http://192.168.1.1/… 就是一次对路由器后台的盲 GET —— 不少路由器的
+                // 改设置接口就是 GET。装上与书源抓取同一套拦截（手动加的组件优先于自动加载的那个）
+                add(OkHttpNetworkFetcherFactory(callFactory = { OkHttpClient.Builder().guardPrivateNetwork().build() }))
             }
             .build()
 

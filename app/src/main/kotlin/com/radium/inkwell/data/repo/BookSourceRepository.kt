@@ -1,5 +1,7 @@
 package com.radium.inkwell.data.repo
 
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import com.radium.inkwell.core.source.BookSourceRule
 import com.radium.inkwell.core.source.BookSourceTypes
 import com.radium.inkwell.data.db.dao.BookSourceDao
@@ -66,7 +68,15 @@ class BookSourceRepository(
      * 导入书源 JSON（Legado 原生格式，数组或单对象）。只收小说源（[BookSourceTypes.TEXT]）；
      * 音频/漫画/文件/视频源按类型过滤并计入 skipped。规则原文原样入库，运行期由引擎直接求值。
      */
-    suspend fun importJson(text: String): Result<ImportReport> = runCatching {
+    suspend fun importJson(text: String): Result<ImportReport> = withContext(Dispatchers.Default) {
+        runCatching { importJsonInternal(text) }
+    }
+
+    /**
+     * 解析整份 JSON、逐条 fromJson/toJson：书源合集动辄几 MB、几千条，在主线程上跑就是几秒冻屏
+     * 乃至 ANR —— 调用方是 viewModelScope（Main.immediate），所以入口自己切到 Default。
+     */
+    private suspend fun importJsonInternal(text: String): ImportReport {
         val root = json.parseToJsonElement(text.trim())
         val objs = when (root) {
             is JsonArray -> root.toList()
@@ -96,7 +106,7 @@ class BookSourceRepository(
             }
             rules += rule
         }
-        upsertRules(rules, skipped)
+        return upsertRules(rules, skipped)
     }
 
     /**
@@ -132,8 +142,14 @@ class BookSourceRepository(
                     enabled = existing?.enabled ?: rule.enabled,
                     sortOrder = existing?.sortOrder ?: 0,
                     json = ruleJson,
-                    updatedAt = now,
-                    groupName = rule.group,
+                    // 同一份规则原样再导一遍不算修改：盖 now 的话，这一行会带着本机的旧启停/分组
+                    // 在 WebDAV 合并里赢过别的设备刚做的修改（合并按 updatedAt 做 LWW）。
+                    // 墓碑被重新导入则是「加回来」，必须盖新时间戳，否则删除会在同步里赢回去。
+                    updatedAt = existing
+                        ?.takeIf { !it.deleted && it.json == ruleJson && it.name == rule.name }
+                        ?.updatedAt
+                        ?: now,
+                    groupName = importedGroup(existing, rule),
                     checkStatus = keepCheck?.checkStatus ?: CheckStatus.UNCHECKED,
                     checkMessage = keepCheck?.checkMessage.orEmpty(),
                     respondTime = keepCheck?.respondTime ?: -1,
@@ -172,8 +188,10 @@ class BookSourceRepository(
 
     suspend fun getEntity(id: String): BookSourceEntity? = loadEntity(id)
 
-    suspend fun getEnabledRules(): List<BookSourceRule> =
+    /** 逐条解码几百份规则 JSON：搜索/发现/预览一进页面就调，别在主线程上做 */
+    suspend fun getEnabledRules(): List<BookSourceRule> = withContext(Dispatchers.Default) {
         dao.getEnabledIds().mapNotNull { id -> getRule(id) }
+    }
 
     /**
      * 启用的书源，**连校验结果一起带出来**。
@@ -181,7 +199,7 @@ class BookSourceRepository(
      * [getEnabledRules] 只给 rule，把 entity 上的 checkStatus/respondTime/sortOrder 全丢了 ——
      * 自动换源要靠这些决定先试谁（校验通过的、响应快的优先占住并发名额）。
      */
-    suspend fun getEnabledForSwitch(): List<EnabledSource> =
+    suspend fun getEnabledForSwitch(): List<EnabledSource> = withContext(Dispatchers.Default) {
         dao.getEnabledIds().mapNotNull { id ->
             val entity = loadEntity(id) ?: return@mapNotNull null
             val rule = runCatching { json.decodeFromString<BookSourceRule>(entity.json) }
@@ -193,6 +211,7 @@ class BookSourceRepository(
                 sortOrder = entity.sortOrder,
             )
         }
+    }
 
     data class EnabledSource(
         val rule: BookSourceRule,
@@ -254,6 +273,20 @@ class BookSourceRepository(
     /**
      * 单条读取；CursorWindow 仍可能因**单行**过大失败，吞掉以免整页列表陪葬。
      */
+    /**
+     * 重新导入时分组听谁的。
+     *
+     * 用户在书源管理里改过分组（库里的分组 ≠ 旧规则自带的分组），就保留用户的 ——
+     * 从前一律用新规则的，重导一次合集，辛苦整理的分组全回到作者写的那个。
+     * 没改过就跟着新规则走：作者在新版里调整了分组，用户理应拿到。
+     */
+    private fun importedGroup(existing: BookSourceEntity?, rule: BookSourceRule): String {
+        if (existing == null || existing.deleted) return rule.group
+        val oldRuleGroup = runCatching { BookSourceRule.fromJson(existing.json).group }.getOrNull()
+            ?: return existing.groupName
+        return if (existing.groupName == oldRuleGroup) rule.group else existing.groupName
+    }
+
     private suspend fun loadEntity(id: String): BookSourceEntity? =
         try {
             dao.getById(id)

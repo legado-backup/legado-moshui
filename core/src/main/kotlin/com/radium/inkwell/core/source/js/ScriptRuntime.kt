@@ -68,9 +68,12 @@ class RhinoScriptRuntime(
     private val prototypeByThread = ThreadLocal<org.mozilla.javascript.ScriptableObject>()
 
     override fun eval(script: String, bindings: Map<String, Any?>): String? {
+        // 嵌套求值（脚本里 java.getString("@js:…") 又回到这里）进的是同一个 Context：只在最外层清零
+        // 指令计数。每进一层都清零的话，`while(true){ java.getString("@js:1") }` 永远撞不到上限
+        val outermost = Context.getCurrentContext() == null
         val cx = factory.enterContext()
         try {
-            cx.putThreadLocal(KEY_COUNT, 0L)
+            if (outermost) cx.putThreadLocal(KEY_COUNT, 0L)
             val proto = prototypeByThread.get() ?: cx.initSafeStandardObjects(null, true).also {
                 prototypeByThread.set(it)
             }

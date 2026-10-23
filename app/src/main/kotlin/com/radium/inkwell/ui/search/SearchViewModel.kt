@@ -67,7 +67,8 @@ data class SearchUiState(
     val results: List<SearchHit> = emptyList(),
     val sourceCount: Int = 0,
     val doneCount: Int = 0,
-    val addingUrl: String? = null,
+    /** 正在加入书架的那几行（按代表条目的 bookUrl）。可以同时加好几本，互不打断 */
+    val addingUrls: Set<String> = emptySet(),
     /** 已取到第几页；与发现页一致地支持滚到底加载更多 */
     val page: Int = 1,
     val hasMore: Boolean = false,
@@ -101,7 +102,6 @@ class SearchViewModel(
     private var searchJob: Job? = null
     private var pagingJob: Job? = null
     private var sortJob: Job? = null
-    private var addJob: Job? = null
     /** 防抖发布：每个源回来就全量重排+刷 UI 会把主线程打满 */
     private var publishJob: Job? = null
     private val hitsMutex = Mutex()
@@ -129,7 +129,6 @@ class SearchViewModel(
         val fetchPage: Int,
         val keyword: String,
         val searchId: Int,
-        val sort: SearchSort,
     )
 
     /**
@@ -225,7 +224,6 @@ class SearchViewModel(
             moreAcc.clear()
             pagingRules = emptyList()
             doneCounter.set(0)
-            val sort = _state.value.sort
             val searchId = _state.value.searchId + 1
             inFlightPage = 1
             _state.value = _state.value.copy(
@@ -236,8 +234,8 @@ class SearchViewModel(
                 page = 1, hasMore = false, loadingMore = false,
                 searchId = searchId,
             )
-            searchRound(rules, keyword, page = 1, sort, searchId, countProgress = true)
-            finishRound(searchId, keyword, sort, fetchPage = 1)
+            searchRound(rules, keyword, page = 1, searchId, countProgress = true)
+            finishRound(searchId, keyword, fetchPage = 1)
         }
     }
 
@@ -256,7 +254,6 @@ class SearchViewModel(
             fetchPage = inFlightPage,
             keyword = s.query.trim(),
             searchId = s.searchId,
-            sort = s.sort,
         ).takeIf { remaining.isNotEmpty() }
         // 让还在飞的旧协程别再往 moreAcc / pending 里写；searchId 没变，已完成的 merge 仍可进 hits
         roundGen++
@@ -274,10 +271,9 @@ class SearchViewModel(
         }
         val searchId = s.searchId
         val keyword = s.query.trim()
-        val sort = s.sort
         viewModelScope.launch {
             val snapshot = hitsMutex.withLock { hits.values.toList() }
-            val sorted = withContext(Dispatchers.Default) { ordered(snapshot, keyword, sort) }
+            val sorted = orderedNow(snapshot, keyword)
             if (_state.value.searchId != searchId) return@launch
             _state.update { it.copy(results = sorted) }
         }
@@ -306,8 +302,8 @@ class SearchViewModel(
                 searchPaused = false,
             )
         }
-        searchRound(p.remaining, p.keyword, p.fetchPage, p.sort, p.searchId, countProgress = p.fetchPage == 1)
-        finishRound(p.searchId, p.keyword, p.sort, p.fetchPage)
+        searchRound(p.remaining, p.keyword, p.fetchPage, p.searchId, countProgress = p.fetchPage == 1)
+        finishRound(p.searchId, p.keyword, p.fetchPage)
     }
 
     /** 打开详情前把多源结果按健康度排好，预览页用第一条当代表源 */
@@ -318,7 +314,6 @@ class SearchViewModel(
         rules: List<BookSourceRule>,
         keyword: String,
         page: Int,
-        sort: SearchSort,
         searchId: Int,
         countProgress: Boolean,
     ) = coroutineScope {
@@ -338,7 +333,7 @@ class SearchViewModel(
                             if (gen != roundGen) return@withPermit
                             val d = doneCounter.incrementAndGet()
                             _state.update { it.copy(doneCount = d) }
-                            schedulePublish(keyword, sort, searchId)
+                            schedulePublish(keyword, searchId)
                             if (pageResult?.hasMore == true) moreAcc += rule
                         } else {
                             val gotNew = hitsMutex.withLock {
@@ -347,7 +342,7 @@ class SearchViewModel(
                                 hits.size > before
                             }
                             if (gen != roundGen) return@withPermit
-                            if (gotNew) schedulePublish(keyword, sort, searchId)
+                            if (gotNew) schedulePublish(keyword, searchId)
                             if (pageResult?.hasMore == true && gotNew) moreAcc += rule
                         }
                     }
@@ -361,12 +356,11 @@ class SearchViewModel(
     private suspend fun finishRound(
         searchId: Int,
         keyword: String,
-        sort: SearchSort,
         fetchPage: Int,
     ) {
         publishJob?.cancel()
         val snapshot = hitsMutex.withLock { hits.values.toList() }
-        val sorted = withContext(Dispatchers.Default) { ordered(snapshot, keyword, sort) }
+        val sorted = orderedNow(snapshot, keyword)
         val more = moreAcc.toList()
         pagingRules = more
         if (_state.value.searchId != searchId) return
@@ -385,17 +379,31 @@ class SearchViewModel(
      * 把 hits 快照排序后刷到 UI。多个源几乎同时回来时合并成一次重排。
      * 新搜索会 cancel [publishJob]，这里靠 searchId 再挡一层串台。
      */
-    private fun schedulePublish(keyword: String, sort: SearchSort, searchId: Int) {
+    private fun schedulePublish(keyword: String, searchId: Int) {
         publishJob?.cancel()
         publishJob = viewModelScope.launch {
             delay(PUBLISH_DEBOUNCE_MS)
             if (_state.value.searchId != searchId) return@launch
             val snapshot = hitsMutex.withLock { hits.values.toList() }
-            val sorted = withContext(Dispatchers.Default) {
-                ordered(snapshot, keyword, sort)
-            }
+            val sorted = orderedNow(snapshot, keyword)
             if (_state.value.searchId != searchId) return@launch
             _state.update { it.copy(results = sorted) }
+        }
+    }
+
+    /**
+     * 按**此刻**选中的排序给快照排序。
+     *
+     * 排序条在搜索途中一直可点。从前开轮时就把 sort 记下、一路传给发布和收尾：用户切到「字数」，
+     * 下一个书源回来、或这一轮收尾时，列表又被按相关度重刷一遍 —— 排序条亮着「字数」，列表却不是。
+     * 排序期间（在 Default 上）又被改了，就按新的再排一次；回到主线程后的比较与写回之间没有挂起点，
+     * 不会再被 setSort 插进来。
+     */
+    private suspend fun orderedNow(snapshot: List<SearchHit>, keyword: String): List<SearchHit> {
+        while (true) {
+            val sort = _state.value.sort
+            val sorted = withContext(Dispatchers.Default) { ordered(snapshot, keyword, sort) }
+            if (_state.value.sort == sort) return sorted
         }
     }
 
@@ -506,7 +514,6 @@ class SearchViewModel(
         if (s.searching || s.loadingMore || s.searchPaused || !s.hasMore || pagingRules.isEmpty()) return
         val keyword = s.query.trim()
         val next = s.page + 1
-        val sort = s.sort
         val rules = pagingRules.toList()
         pagingJob?.cancel()
         publishJob?.cancel()
@@ -515,17 +522,21 @@ class SearchViewModel(
             moreAcc.clear()
             inFlightPage = next
             _state.value = _state.value.copy(loadingMore = true)
-            searchRound(rules, keyword, next, sort, searchId, countProgress = false)
-            finishRound(searchId, keyword, sort, next)
+            searchRound(rules, keyword, next, searchId, countProgress = false)
+            finishRound(searchId, keyword, next)
         }
     }
 
+    /**
+     * 每一行各自一个任务。从前共用一个 addJob、新的先 cancel 旧的：A 还在拉详情时点 B，
+     * A 被悄悄取消 —— 转圈没了、按钮还是「加入」、书也不在架上，没有任何提示。
+     */
     fun addToShelf(hit: SearchHit) {
-        addJob?.cancel()
-        addJob = viewModelScope.launch {
+        val rowUrl = hit.result.bookUrl
+        if (rowUrl in _state.value.addingUrls) return // 同一行连点
+        _state.update { it.copy(addingUrls = it.addingUrls + rowUrl) }
+        viewModelScope.launch {
             val ranked = rankedResults(hit.results)
-            val rowUrl = hit.result.bookUrl
-            _state.update { it.copy(addingUrl = rowUrl) }
             try {
                 var lastMsg: String? = null
                 for (r in ranked.take(MAX_ADD_TRIES)) {
@@ -554,7 +565,7 @@ class SearchViewModel(
                 }
                 messages.emit("加入失败: ${lastMsg?.take(80) ?: "没有能用的书源"}")
             } finally {
-                _state.update { s -> if (s.addingUrl == rowUrl) s.copy(addingUrl = null) else s }
+                _state.update { it.copy(addingUrls = it.addingUrls - rowUrl) }
             }
         }
     }

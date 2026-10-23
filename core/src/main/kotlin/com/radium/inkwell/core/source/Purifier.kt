@@ -23,18 +23,43 @@ class Purifier private constructor(
         if (compiled.isEmpty()) return elements
         // 预算覆盖**整章**，而不是每段各发一份：否则一条病态规则会在每个段落上各烧满一次预算，
         // 总耗时 = 预算 × 段数，等于没有上限。
-        return apply(elements, Budget())
+        return guarded { apply(elements, it) }
     }
 
-    private fun apply(elements: List<ContentElement>, budget: Budget): List<ContentElement> {
+    fun apply(text: String): String = guarded { apply(text, it) }
+
+    /**
+     * 整章一次交给 [RegexWatchdog]：真机上 [GuardedText] 拦不住 ICU 的回溯，只能靠看门狗
+     * 让调用方别陪着卡死（阅读器是在互斥锁里净化的，卡住就是此后每一章都转圈）。
+     * 整章一次而不是每段每条规则一次：一章几百段 × 几十条规则，逐次换线程的开销就不可忽略了。
+     *
+     * 本进程内超时过的规则还在列表里，就不再跑 —— 再跑一次只会再钉死一条停不下来的线程。
+     */
+    private fun <T> guarded(block: (Run) -> T): T {
+        if (compiled.none { it.isRegex }) return block(Run(Budget()))
+        if (compiled.any { it.isRegex && RegexWatchdog.isPoisoned(it.pattern) }) throw PurifyTimeoutException()
+        val run = Run(Budget())
+        return try {
+            RegexWatchdog.run(current = { run.pattern }) { block(run) }
+        } catch (_: RegexBudgetExceeded) {
+            throw PurifyTimeoutException()
+        }
+    }
+
+    /** 一次净化的现场：共享的时间预算，以及此刻正在跑哪条规则（超时时据此拉黑元凶） */
+    private class Run(val budget: Budget) {
+        @Volatile var pattern: String? = null
+    }
+
+    private fun apply(elements: List<ContentElement>, run: Run): List<ContentElement> {
         // 含 `\n` 或 `(?s)`（DOTALL）的规则是**跨段**的：要匹配的文本横跨多个段落，
         // 逐段各自 apply 永远匹配不到（这正是「规则页试算对、书里不生效」的一类成因）。
         // 有这类规则时退回「整章文本 join → apply → 按换行重新拆段」路径。
-        if (compiled.any { it.multiline }) return applyCrossParagraph(elements, budget)
+        if (compiled.any { it.multiline }) return applyCrossParagraph(elements, run)
         return elements.mapNotNull { el ->
             when (el) {
-                is ContentElement.Paragraph -> clean(el.text, budget)?.let { ContentElement.Paragraph(it) }
-                is ContentElement.Heading -> clean(el.text, budget)?.let { ContentElement.Heading(el.level, it) }
+                is ContentElement.Paragraph -> clean(el.text, run)?.let { ContentElement.Paragraph(it) }
+                is ContentElement.Heading -> clean(el.text, run)?.let { ContentElement.Heading(el.level, it) }
                 else -> el
             }
         }
@@ -46,13 +71,13 @@ class Purifier private constructor(
      */
     private fun applyCrossParagraph(
         elements: List<ContentElement>,
-        budget: Budget,
+        run: Run,
     ): List<ContentElement> {
         val out = mutableListOf<ContentElement>()
         val buffer = mutableListOf<String>()
         fun flush() {
             if (buffer.isEmpty()) return
-            apply(buffer.joinToString("\n"), budget).split("\n")
+            apply(buffer.joinToString("\n"), run).split("\n")
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
                 .forEach { out += ContentElement.Paragraph(it) }
@@ -66,12 +91,11 @@ class Purifier private constructor(
         return out
     }
 
-    fun apply(text: String): String = apply(text, Budget())
-
-    private fun apply(text: String, budget: Budget): String = compiled.fold(text) { acc, p ->
+    private fun apply(text: String, run: Run): String = compiled.fold(text) { acc, p ->
+        run.pattern = p.pattern
         // apply 期兜底：替换串里的 `$`（Illegal group reference）、灾难性回溯的 StackOverflowError
         // 都会在这里炸。runCatching 捕获 Throwable，宽松模式保原文、严格模式抛 SourceException。
-        runCatching { p.apply(acc, budget) }.getOrElse { e ->
+        runCatching { p.apply(acc, run.budget) }.getOrElse { e ->
             // 超时是**整章级别的降级信号**，不能被"跳过这条坏规则"的宽松逻辑吞掉：吞了的话
             // 后面每条规则都会立刻再超时一次，最后静默返回原文 —— 用户只会看到"我的净化规则
             // 怎么不生效了"，永远查不到原因。与本项目「catch 前先 rethrow 取消」同一个道理。
@@ -81,14 +105,15 @@ class Purifier private constructor(
         }
     }
 
-    private fun clean(text: String, budget: Budget): String? =
-        apply(text, budget).trim().takeIf { it.isNotEmpty() }
+    private fun clean(text: String, run: Run): String? =
+        apply(text, run).trim().takeIf { it.isNotEmpty() }
 
     private class Compiled(rule: PurifyRule) {
         private val regex: Regex? = if (rule.isRegex) Regex(rule.pattern) else null
         private val literal: String = rule.pattern
         private val replacement: String = rule.replacement
         val pattern: String = rule.pattern
+        val isRegex: Boolean get() = regex != null
         /** 跨段规则：正则含换行（字面 `\n` 或真换行）或 DOTALL 标志，需在整章文本上匹配 */
         val multiline: Boolean = rule.isRegex &&
             (rule.pattern.contains("\\n") || rule.pattern.contains('\n') || rule.pattern.contains("(?s)"))

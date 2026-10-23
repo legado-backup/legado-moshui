@@ -4,6 +4,12 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 应用内下载更新包后拉起系统安装器（中转服务器源） -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!--
+      Android 17（targetSdk 37）起，连局域网要这个运行时权限（「附近设备」组）。
+      自备 WebDAV 常是家里的 NAS（192.168.x.x / xxx.local）；没有它连接不报错、只会挂到超时。
+      只在 WebDAV 地址落在局域网里时才申请，见 util/LocalNetworkAccess.kt
+    -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <!--
       application 的 android:icon 只出现在「设置 → 应用」「最近任务」这类地方，且**不随

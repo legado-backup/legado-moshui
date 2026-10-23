@@ -111,7 +111,8 @@ val appModule = module {
     single { ReplaceRuleRepository(get()) }
     single { NetBookRepository(get(), get(), get(), get(), get()) }
     single { AutoSourceSwitcher(get(), get()) }
-    single { WebDavRepository(get(), get(), get(), get(), get(), get(), get(), get(), get(), get()) }
+    single { com.radium.inkwell.util.LocalNetworkAccess(androidContext()) }
+    single { WebDavRepository(get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get()) }
     single { com.radium.inkwell.data.net.OfficialWebDavClient(get()) }
     single { com.radium.inkwell.data.repo.OfficialWebDavRepository(get(), get()) }
 
@@ -126,7 +127,7 @@ val appModule = module {
     viewModel { com.radium.inkwell.ui.explore.ExploreViewModel(get(), get(), get(), get()) }
     viewModel { SourceManageViewModel(androidContext(), get(), get(), get(), get()) }
     viewModel { (sourceId: String) -> SourceDetailViewModel(sourceId, get(), get(), get()) }
-    viewModel { WebDavViewModel(get(), get(), get()) }
+    viewModel { WebDavViewModel(get(), get(), get(), get()) }
     viewModel { com.radium.inkwell.ui.feedback.FeedbackViewModel(androidContext(), get(), get()) }
     viewModel { com.radium.inkwell.ui.replace.ReplaceRuleViewModel(get()) }
     viewModel { com.radium.inkwell.ui.rss.RssSourceViewModel(androidContext(), get()) }

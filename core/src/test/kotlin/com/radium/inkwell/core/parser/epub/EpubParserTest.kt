@@ -75,4 +75,11 @@ class EpubParserTest {
         f.writeBytes(byteArrayOf(1, 2, 3, 4, 5))
         assertTrue(!EpubParser().sniff(f))
     }
+
+    /** href 是 URI：`+` 是字面加号（空格才写 %20）。按表单解码会把它解成空格，章节就找不到了 */
+    @Test
+    fun `href 里的加号不被解成空格`() {
+        assertEquals("OEBPS/Text/chapter+1.xhtml", resolvePath("OEBPS/Text", "chapter+1.xhtml"))
+        assertEquals("OEBPS/Text/a b.xhtml", resolvePath("OEBPS/Text", "a%20b.xhtml"))
+    }
 }

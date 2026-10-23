@@ -1,5 +1,7 @@
 package com.radium.inkwell.core.source.rss
 
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import com.radium.inkwell.core.model.ContentElement
 import com.radium.inkwell.core.parser.html.HtmlToElements
 import com.radium.inkwell.core.source.EvalContext
@@ -23,7 +25,14 @@ class RssEngine(
     private val evaluator = RuleEvaluator(scriptRuntime = scriptRuntime)
     private val htmlToElements = HtmlToElements()
 
-    suspend fun articles(rule: RssSourceRule, sortUrl: String, page: Int = 1): RssArticlePage {
+    /**
+     * 公开入口一律在 IO 线程自我确权（同 BookSourceEngine）：调用方是 viewModelScope，
+     * 抓取恢复之后的解码、XML/Jsoup 解析、规则脚本（Rhino 最多 2000 万条指令）从前全跑在主线程上。
+     */
+    suspend fun articles(rule: RssSourceRule, sortUrl: String, page: Int = 1): RssArticlePage =
+        withContext(Dispatchers.IO) { articlesOnIo(rule, sortUrl, page) }
+
+    private suspend fun articlesOnIo(rule: RssSourceRule, sortUrl: String, page: Int): RssArticlePage {
         val url = resolveUrl(rule.id, expandPage(sortUrl, page))
         val fetched = http.fetch(
             url,
@@ -72,7 +81,10 @@ class RssEngine(
      * 的 content:encoded 本来就是全文）；两者都没有则返回 null —— 调用方该拿浏览器打开
      * 原链接，而不是给用户看一个空白页。
      */
-    suspend fun content(rule: RssSourceRule, article: RssArticle): List<ContentElement>? {
+    suspend fun content(rule: RssSourceRule, article: RssArticle): List<ContentElement>? =
+        withContext(Dispatchers.IO) { contentOnIo(rule, article) }
+
+    private suspend fun contentOnIo(rule: RssSourceRule, article: RssArticle): List<ContentElement>? {
         if (!rule.content.isNullOrBlank() && article.link.isNotBlank()) {
             val url = resolveUrl(rule.id, article.link)
             val fetched = http.fetch(url, headers = rule.headers, charsetOverride = rule.charset)

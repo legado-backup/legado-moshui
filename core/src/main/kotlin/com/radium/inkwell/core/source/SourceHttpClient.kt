@@ -193,13 +193,22 @@ class SourceHttpClient(
         if (!hasUa) b.header("User-Agent", DEFAULT_UA)
 
         if (method.equals("POST", ignoreCase = true)) {
-            val mediaType = (contentType ?: "application/x-www-form-urlencoded").toMediaTypeOrNull()
+            // 没声明 Content-Type 时按 body 的样子定：JSON 就发 application/json（与 Legado 一致）。
+            // 从前一律当表单发，`,{"method":"POST","body":"{\"id\":1}"}` 这类接口源要么 415，
+            // 要么服务端按表单解析拿不到参数 —— 搜索/目录直接是空的
+            val mediaType = (contentType ?: defaultPostContentType(body)).toMediaTypeOrNull()
             val cs = charsetOverride?.let { runCatching { charsetOf(it) }.getOrNull() } ?: Charsets.UTF_8
             b.post((body ?: "").toByteArray(cs).toRequestBody(mediaType))
         } else {
             b.method(method.uppercase(), null)
         }
         return b.build()
+    }
+
+    private fun defaultPostContentType(body: String?): String {
+        val t = body?.trim().orEmpty()
+        val looksJson = (t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"))
+        return if (looksJson) "application/json; charset=UTF-8" else "application/x-www-form-urlencoded"
     }
 
     /** OkHttp 允许的头值字符：可见 ASCII 与制表符 */

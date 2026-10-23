@@ -15,7 +15,11 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import com.radium.inkwell.data.db.entity.BookType
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -70,7 +74,10 @@ class BookshelfViewModel(
         refreshJob?.cancel()
         _refreshing.value = true
         _refreshProgress.value = BookshelfRefreshProgress()
-        refreshJob = viewModelScope.launch {
+        // 先登记、再启动。viewModelScope 跑在 Main.immediate 上，普通 launch 会**当场**执行到第一个
+        // 挂起点：「书架上没有网络书」这条路一路不挂起就走完了，finally 里的 refreshJob 还是上一轮的
+        // （或 null），`refreshJob === myJob` 不成立 —— 转圈永远停不下来。
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             val myJob = coroutineContext.job
             try {
                 val books = allBooks.value
@@ -137,6 +144,8 @@ class BookshelfViewModel(
                 }
             }
         }
+        refreshJob = job
+        job.start()
     }
 
     companion object {
@@ -211,6 +220,26 @@ class BookshelfViewModel(
     private val _showHidden = MutableStateFlow(false)
     val showHidden: StateFlow<Boolean> = _showHidden.asStateFlow()
 
+    /**
+     * 「退出 App 就复位」得真的发生。书架是根页面，它的 ViewModel 跟着 Activity 活：
+     * Android 12 起在根页按返回只是把任务挪到后台，按 Home、切最近任务更是如此 —— 进程不死，
+     * 隐藏区就一直开着，下一个拿起手机的人不用验证就看得到。
+     *
+     * 跟的是**整个 App** 退到后台（ProcessLifecycleOwner），不是书架页自己的生命周期：
+     * 从隐藏区点开一本书进阅读页，书架页也会 stop，那时收起只会逼用户读完回来再验证一次。
+     */
+    private val collapseHiddenOnBackground = object : DefaultLifecycleObserver {
+        override fun onStop(owner: LifecycleOwner) = collapseHiddenAll()
+    }
+
+    init {
+        ProcessLifecycleOwner.get().lifecycle.addObserver(collapseHiddenOnBackground)
+    }
+
+    override fun onCleared() {
+        ProcessLifecycleOwner.get().lifecycle.removeObserver(collapseHiddenOnBackground)
+    }
+
     /** 查看隐藏书籍要不要先验证身份 */
     val hiddenRequireAuth: StateFlow<Boolean> = appPrefs.hiddenRequireAuth
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
@@ -251,6 +280,17 @@ class BookshelfViewModel(
 
     private val _selected = MutableStateFlow<Set<String>>(emptySet())
     val selected: StateFlow<Set<String>> = _selected.asStateFlow()
+
+    init {
+        // 多选只对**看得见的**书生效。选了几本再切分组、或收起隐藏区，看不见的书还留在选中集合里，
+        // 「删除 N 本」就会把它们一起删掉 —— 用户根本不知道自己选过。可见列表一变就把选中收窄。
+        viewModelScope.launch {
+            books.collect { visible ->
+                val ids = visible.mapTo(HashSet()) { it.id }
+                _selected.update { sel -> if (ids.containsAll(sel)) sel else sel.filterTo(LinkedHashSet()) { it in ids } }
+            }
+        }
+    }
 
     fun toggleSelect(id: String) {
         _selected.value = _selected.value.let { if (id in it) it - id else it + id }

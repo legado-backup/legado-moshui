@@ -33,6 +33,22 @@ class HtmlToElementsTest {
         )
     }
 
+    /**
+     * 同一类源走 `@html` 规则时，outerHtml() 的 pretty-print 先把文本里的换行折成了空格：
+     * `\n　　段2` 到转换这一步只剩 ` 　　段2`。不认这个形态，整章还是一段。
+     */
+    @Test
+    fun `被 pretty-print 压扁的换行加缩进同样分段`() {
+        val paras = paragraphs("<div id=\"BookText\">　　一拳碰撞，火星四溅！ 　　火神闷哼一声。 　　他的嘴角，溢出鲜血。</div>")
+        assertEquals(listOf("一拳碰撞，火星四溅！", "火神闷哼一声。", "他的嘴角，溢出鲜血。"), paras)
+    }
+
+    /** 没有换行时只认两个以上的缩进字符：空格后偶尔跟一个全角空格不是段落边界 */
+    @Test
+    fun `空格后跟单个全角空格不分段`() {
+        assertEquals(listOf("他说： 　好。"), paragraphs("<div>他说： 　好。</div>"))
+    }
+
     /** 单个全角空格缩进的站点同样要切开 */
     @Test
     fun `单个全角空格缩进也算段首`() {
