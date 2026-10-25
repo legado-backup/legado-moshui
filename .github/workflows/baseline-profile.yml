@@ -66,7 +66,21 @@ jobs:
           # 设置（见 Motion.kt 的 animationsEnabled），关了之后转场全走 tween(0) 分支，
           # 生成出来的 profile 就少了真实用户必然会走的那段动画代码。
           disable-animations: false
-          script: ./gradlew :app:generateBaselineProfile
+          # 失败时把测试结果 XML 打进日志：Gradle 控制台只说一句「There were failing tests」，
+          # 真正的报错（哪个测试、找不到哪个元素）只在 runner 磁盘上的报告里，跑完就没了 ——
+          # 8 月那两次失败就是这么看不见原因的。写成一行：这个 action 按行逐条执行 script
+          script: ./gradlew :app:generateBaselineProfile || (find baselineprofile/build/outputs/androidTest-results -name '*.xml' -exec cat {} + ; exit 1)
+
+      # 同一份报告连同设备日志留作 artifact，日志里看不全时下载这个
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baselineprofile-reports
+          path: |
+            baselineprofile/build/reports/androidTests/
+            baselineprofile/build/outputs/androidTest-results/
+          if-no-files-found: ignore
 
       - name: Summarize diff
         run: |
