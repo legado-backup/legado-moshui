@@ -121,7 +121,7 @@ class BaselineProfileGenerator {
         // 能稳妥认出来的是阅读菜单里的「退出阅读」按钮 —— 顺带把菜单也收进 profile。
         tap(By.text(SEED_TITLE), "书架上的夹具书（ProfileSeed 导入）")
         check(device.wait(Until.gone(By.desc("搜索")), UI_TIMEOUT_MS)) {
-            "点了夹具书却没离开书架：书卡点击没打开阅读器"
+            "点了夹具书却没离开书架：书卡点击没打开阅读器。${describeScreen()}"
         }
         device.waitForIdle()
         val w = device.displayWidth
@@ -134,7 +134,7 @@ class BaselineProfileGenerator {
             device.click(w / 2, h / 2)
             device.wait(Until.hasObject(By.desc("退出阅读")), MENU_RETRY_MS)
         }
-        check(menuShown) { "进了阅读页但呼不出阅读菜单：阅读器没排出页，或点中间没反应" }
+        check(menuShown) { "进了阅读页但呼不出阅读菜单：阅读器没排出页，或点中间没反应。${describeScreen()}" }
         device.waitForIdle()
         // 不数返回键：菜单此刻可能开着也可能正在收（上面补点那一下可能把它点了回去），
         // 写死按两下的话，菜单其实已关时第二下就落在书架根页上，把 App 退了 —— CI 上真出过
@@ -143,12 +143,15 @@ class BaselineProfileGenerator {
 
     /** 按返回直到回到书架；每按一下之前先看是不是已经到了，绝不在书架根页上多按 */
     private fun MacrobenchmarkScope.backToBookshelf() {
-        repeat(MAX_BACKS) {
+        // 每按一下前屏上是什么都记下来：失败时才看得出是哪一下走岔的
+        val trail = mutableListOf<String>()
+        repeat(MAX_BACKS) { i ->
             if (onBookshelf()) return awaitBookshelf()
+            trail += "第 ${i + 1} 下返回前 —— ${describeScreen()}"
             back()
             device.wait(Until.hasObject(By.desc("搜索")), BACK_SETTLE_MS)
         }
-        awaitBookshelf()
+        awaitBookshelf(trail.joinToString("\n", prefix = "\n"))
     }
 
     /**
@@ -161,9 +164,26 @@ class BaselineProfileGenerator {
     /** 等到元素出现再点。找不到直接失败 —— 见 generate() 里那段「静默跳过 + 返回键退出 App」的事故 */
     private fun MacrobenchmarkScope.tap(selector: BySelector, what: String) {
         val target = device.wait(Until.findObject(selector), UI_TIMEOUT_MS)
-            ?: error("找不到「$what」—— 界面改过了？生成器要跟着改，否则 profile 会悄悄只剩冷启动")
+            ?: error("找不到「$what」—— 界面改过了？生成器要跟着改，否则 profile 会悄悄只剩冷启动。${describeScreen()}")
         target.click()
         device.waitForIdle()
+    }
+
+    /**
+     * 失败时把「此刻屏上是什么」一起报出去。CI 上看不到屏幕，只凭一句「等不到 xx」分不清
+     * 是 App 退了、弹了个没想到的对话框，还是停在别的页 —— 每猜一次就是一轮几分钟的模拟器
+     */
+    private fun MacrobenchmarkScope.describeScreen(): String {
+        val labels = runCatching {
+            device.findObjects(By.pkg(PACKAGE)).asSequence()
+                .flatMap { sequenceOf(it.contentDescription, it.text) }
+                .filterNotNull()
+                .filter { it.isNotBlank() }
+                .distinct()
+                .take(40)
+                .toList()
+        }.getOrElse { listOf("（读取失败：${it.javaClass.simpleName}）") }
+        return "当前前台：${device.currentPackageName}；屏上的文字/描述：$labels"
     }
 
     private fun MacrobenchmarkScope.back() {
@@ -172,13 +192,13 @@ class BaselineProfileGenerator {
     }
 
     /** 回到书架根页：以顶栏的搜索 + 齿轮为准（多选态下才有的「更多」不能当标志），见 [onBookshelf] */
-    private fun MacrobenchmarkScope.awaitBookshelf() {
+    private fun MacrobenchmarkScope.awaitBookshelf(history: String = "") {
         // 轮询两样一起在，而不是 wait 其中一样：搜索页自己也可能有个「搜索」，
         // 转场没走完时只等到它就往下判，会把「还在路上」误报成「回不去」
         val deadline = SystemClock.uptimeMillis() + UI_TIMEOUT_MS
         while (!onBookshelf()) {
             check(SystemClock.uptimeMillis() < deadline) {
-                "等不到书架顶栏的搜索与设置：没回到书架，或 App 已经退出"
+                "等不到书架顶栏的搜索与设置：没回到书架，或 App 已经退出。${describeScreen()}$history"
             }
             Thread.sleep(POLL_MS)
         }
