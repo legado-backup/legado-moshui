@@ -43,13 +43,13 @@ export JAVA_HOME=/opt/java/jdk-21.0.11+10   # 需 JDK 21
 
 ### 动效 → `app/.../ui/components/Motion.kt`
 
-**组件与浮层都以 `MaterialTheme.motionScheme` 为唯一来源**（整页转场与阅读器开合是下面列明的例外）。优先用 `topBarEnter/Exit`、`bottomBarEnter/Exit`、`scrimEnter/Exit`、`expandEnter/Exit`；整页转场用 `pagePushTransform` / `pagePopTransform`；需要裸 spec（`animateItem`、`AnimatedContent`）时读令牌，**别裸写 `tween(300)`**。
+**组件与浮层都以 `MaterialTheme.motionScheme` 为唯一来源**（整页转场与阅读器开合是下面列明的例外）。优先用 `topBarEnter/Exit`、`bottomBarEnter/Exit`、`scrimEnter/Exit`、`expandEnter/Exit`；整页转场由 `ui/nav/PageSlide.kt` 统一做，页面别自己加进退动画；需要裸 spec（`animateItem`、`AnimatedContent`）时读令牌，**别裸写 `tween(300)`**。
 - **spatial / effects 分工**（M3 约定，混了会难看）：位移与尺寸用 `defaultSpatialSpec()`，纯视觉属性（alpha、颜色）用 `defaultEffectsSpec()`。
 - **「退场比入场快」**：帮手里入场 `default*`、退场 `fast*`。
 - **系统「移除动画」**：`InkwellTheme` 把 `motionScheme` 换成 `InstantMotionScheme`；帮手里不必再判 `animationsEnabled()`。`animateItem` 仍可传 `null` 省插值；reader 翻页在主题外。
-- **页面进退**：共享轴 X —— 新页整屏从右滑入、旧页左让约 1/4（返回镜像）；**不要加 fade**（半透明叠字会退化成渐隐渐显）。用**定时长 tween + 强调减速**（`PAGE_ENTER_MS` / `PAGE_EXIT_MS`，`Motion.EmphasizedDecelerate`），别改回令牌 spring：spatial spring 的回弹放在整页上就是终点处冲过头再爬回来的「顿一下」，长尾还会和紧接着的侧滑抢转场（实测过）。
+- **页面进退**：共享轴 X —— 新页整屏从右滑入、旧页左让约 1/4（返回镜像）；**不要加 fade**（半透明叠字会退化成渐隐渐显）。用**不回弹的 spring**（`PAGE_ENTER_STIFFNESS` / `PAGE_EXIT_STIFFNESS`，dampingRatio = 1），位移由 `PageSlide.kt` 的页面装饰器自己做。两条都实测过、别改回去：① 令牌 spring 带回弹，整页上就是终点冲过头再爬回来的「顿一下」；② 内置 `slideIn/OutHorizontally` 或 tween 在转场被打断（快速进退、页面掉头）时会被 Compose 换成它自己的默认 spring，掉头那页起步慢、尾巴一像素一像素地爬 —— spring 是被打断时唯一会保留的 spec。
 - **阅读器开合仍硬编码 tween**（`READER_ENTER_MS` / `READER_EXIT_MS`）：与 splash 窗口咬合，别改成令牌 spring。
-- **侧滑返回用线性 tween**（`pagePredictivePopTransform` / `PREDICTIVE_BACK_MS`）：侧滑时转场按手势进度 seek，spring 曲线前段太陡，页面在进度三成就冲到头、之后不跟手。别改成令牌 spring。
+- **侧滑返回用线性 tween**（`PageSlideMode.Predictive` / `PREDICTIVE_BACK_MS`）：侧滑时转场按手势进度 seek，spring 曲线前段太陡，页面在进度三成就冲到头、之后不跟手。别改成令牌 spring。
 - 以上三处（页面进退、阅读器开合、侧滑返回）是动效层仅有的刻意例外。
 
 ### 主题入口 → `MaterialExpressiveTheme`

@@ -10,17 +10,13 @@ import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FiniteAnimationSpec
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -45,10 +41,10 @@ import androidx.compose.ui.platform.LocalContext
  * 用 effects 做位移会发木；用 spatial 做淡入会让透明度过冲，看着像闪了一下。
  * 「退场比入场快」：帮手里退场取 `fast*`、入场取 `default*`。
  *
- * 硬编码 tween 的两处，理由各不相同：
+ * 不读令牌的两处，理由各不相同：
  * - **阅读器开合**：时长与进书 splash 窗口咬合，spring 给不出确定时长（[Motion.READER_ENTER_MS]）；
- * - **整页转场**：spatial spring 的回弹放在整页上就成了终点处「顿一下」，长尾还会和侧滑抢转场
- *   （[Motion.PAGE_ENTER_MS]）；侧滑另需线性才跟手（[Motion.PREDICTIVE_BACK_MS]）。
+ * - **整页转场**：用不回弹的 spring 而非令牌（[Motion.PAGE_ENTER_STIFFNESS]），侧滑另需线性 tween
+ *   才跟手（[Motion.PREDICTIVE_BACK_MS]）；位移由 ui/nav/PageSlide.kt 自己做，不用内置 slide。
  */
 object Motion {
 
@@ -75,7 +71,7 @@ object Motion {
      * 空间暗示。返回走配对的 [readerExitSpec]。
      */
     const val READER_ENTER_MS = 200
-    /** M3「强调减速」：起步快、收尾缓，落定像被接住。阅读器入场与整页转场共用 */
+    /** M3「强调减速」：起步快、收尾缓，落定像被接住。阅读器入场用 */
     val EmphasizedDecelerate: Easing = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)
     val ReaderEnterEasing: Easing = EmphasizedDecelerate
 
@@ -123,30 +119,31 @@ object Motion {
     const val READER_SPLASH_MIN_MS = 200L
 
     /**
-     * 整页前进 / 返回转场：时长固定的 tween，不走 [MaterialTheme.motionScheme] 的 spring。
+     * 整页前进 / 返回转场：**不回弹**的 spring（dampingRatio = 1），不走 [MaterialTheme.motionScheme]。
      *
-     * Expressive 的位移 spring 带回弹，放在小组件上是手感，放在整页上就成了「顿一下」：
-     * NavTrace 逐帧实测，进设置时新页冲过终点 18px 再用约 230ms 爬回 0，被盖的书架目标 -305
-     * 却冲到 -334 再抖回来 —— 帧一帧没掉，眼睛看到的是终点处掉头。spring 还有一条长尾：
-     * 完全停稳要 400–500ms，这段尾巴里开始侧滑，NavDisplay 会把转场取反（见 InkwellNavDisplay）。
-     * tween 不超调、准点结束，前进 / 返回 / 侧滑（[PREDICTIVE_BACK_MS]）也就都是时长制，节奏一致。
+     * 刚度沿用 Expressive 位移令牌（默认 700 / 快速 1400），只去掉回弹。Expressive 的 spring 带回弹，
+     * 放在小组件上是手感，放在整页上就成了「顿一下」：NavTrace 逐帧实测，进设置时新页冲过终点 18px
+     * 再用约 230ms 爬回 0，被盖的书架目标 -305 却冲到 -334 再抖回来。
      *
-     * 曲线两边都用强调减速 [EmphasizedDecelerate]：共享轴里两页同时在动，
-     * 被盖页若用「慢起快走」的强调加速，起步那一下像没跟上。被盖页时长取入场的约 65%
-     * （「退场比入场快」），它只挪 1/4 屏，早一点停稳不显眼。
+     * 也试过定时长 tween（beta.8）：正常进退干净了，但**快速进退**仍卡 —— 转场被打断时
+     * Compose 的 Transition 会把非 spring 的 spec 换成它自己的默认 spring，掉头那页起步慢、
+     * 尾巴一像素一像素地爬。spring 是被打断时唯一会被保留的 spec，掉头带着当前速度转向，
+     * 和正常进退同一条曲线。实现与细节见 ui/nav/PageSlide.kt。
+     *
+     * 入场 700 约 350ms 停稳；被盖页取 1400（「退场比入场快」），它只挪 1/4 屏，早一点停稳不显眼。
      */
-    const val PAGE_ENTER_MS = 350
-    const val PAGE_EXIT_MS = 230
+    const val PAGE_ENTER_STIFFNESS = 700f
+    const val PAGE_EXIT_STIFFNESS = 1400f
 
     /**
-     * 侧滑返回（预测性返回）转场的总时长。与 [PAGE_ENTER_MS] 同样不走令牌，但另需**线性**，原因与 spring 的形状有关：
+     * 侧滑返回（预测性返回）转场的总时长。与 [PAGE_ENTER_STIFFNESS] 同样不走令牌，但另需**线性**，原因与 spring 的形状有关：
      *
      * 侧滑时 NavDisplay 不「播放」转场，而是按手势进度 **seek** 到转场的某个时刻；松手后再用
      * `tween((1 - 进度) × 总时长)` 把剩下的拖完。spring 的位移曲线前段极陡 —— 实测进度 0.37 时页面
      * 已冲过屏宽（1286 / 1220）再回弹，手指才划了三分之一画面就到头了，之后怎么拖都不动，像卡住。
      * 只有线性 tween 能让「进度 = 位移」，页面跟着手指走。
      *
-     * 300ms 只决定松手后剩余部分走多快（剩一半就是 150ms），与返回箭头那条 tween 收尾观感相近。
+     * 300ms 只决定松手后剩余部分走多快（剩一半就是 150ms），与返回箭头那条 spring 收尾观感相近。
      */
     const val PREDICTIVE_BACK_MS = 300
 }
@@ -155,7 +152,7 @@ object Motion {
  * 系统 [Settings.Global.ANIMATOR_DURATION_SCALE]（开发者选项「动画程序时长缩放」）。
  *
  * - `0`：「移除动画」—— 主题换 [InstantMotionScheme]；不读令牌的页面进退由 [animationsEnabled] 自己归零
- * - `0.5` / `1` / `2`…：阅读器与页面进退的 tween 由框架 `MotionDurationScale` 自动乘倍率
+ * - `0.5` / `1` / `2`…：阅读器与页面进退的动画由框架 `MotionDurationScale` 自动乘倍率
  *
  * 用 ContentObserver 实时听，别 `remember {}` 读一次 —— 用户改完设置应立刻生效。
  * 同一组合里只挂一处观察者；[animationsEnabled] 复用本函数，避免双重监听。
@@ -192,47 +189,6 @@ fun rememberAnimatorDurationScale(): Float {
  */
 @Composable
 fun animationsEnabled(): Boolean = rememberAnimatorDurationScale() != 0f
-
-/**
- * 页面前进：共享轴 X —— 新页整屏从右滑入，旧页左让约 1/4。
- *
- * **不加 fade**：半透明叠字会退化成渐隐渐显。时长与曲线见 [Motion.PAGE_ENTER_MS]：
- * 整页刻意不用主题的 spring（带回弹，终点会掉头）。系统「移除动画」时时长归零 ——
- * 这里不读 motionScheme，主题那层 InstantMotionScheme 管不到它。
- */
-@Composable
-fun pagePushTransform(): ContentTransform {
-    val (enter, exit) = pageDurations()
-    return slideInHorizontally(tween(enter, easing = Motion.EmphasizedDecelerate)) { it } togetherWith
-        slideOutHorizontally(tween(exit, easing = Motion.EmphasizedDecelerate)) { -it / 4 }
-}
-
-/**
- * 页面返回：与 [pagePushTransform] 镜像 —— 当前页右滑出，底层页从左侧 1/4 处回位。
- */
-@Composable
-fun pagePopTransform(): ContentTransform {
-    val (enter, exit) = pageDurations()
-    return slideInHorizontally(tween(enter, easing = Motion.EmphasizedDecelerate)) { -it / 4 } togetherWith
-        slideOutHorizontally(tween(exit, easing = Motion.EmphasizedDecelerate)) { it }
-}
-
-/** (入场, 退场) 时长；关了系统动画就都归零 */
-@Composable
-private fun pageDurations(): Pair<Int, Int> =
-    if (animationsEnabled()) Motion.PAGE_ENTER_MS to Motion.PAGE_EXIT_MS else 0 to 0
-
-/**
- * 侧滑返回：几何与 [pagePopTransform] 相同（当前页右滑出、底层页从左 1/4 回位），
- * 只是两段都换成**线性** tween —— 侧滑时转场是按手势进度 seek 的，理由见 [Motion.PREDICTIVE_BACK_MS]。
- * 系统「移除动画」时时长归零：这里不读 motionScheme，主题那层 InstantMotionScheme 管不到它。
- */
-@Composable
-fun pagePredictivePopTransform(): ContentTransform {
-    val duration = if (animationsEnabled()) Motion.PREDICTIVE_BACK_MS else 0
-    return slideInHorizontally(tween(duration, easing = LinearEasing)) { -it / 4 } togetherWith
-        slideOutHorizontally(tween(duration, easing = LinearEasing)) { it }
-}
 
 /** 顶栏：从上方滑入 + 淡入 */
 @Composable

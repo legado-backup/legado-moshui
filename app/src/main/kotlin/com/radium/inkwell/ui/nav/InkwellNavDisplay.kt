@@ -39,9 +39,6 @@ import com.radium.inkwell.ui.bookshelf.BookshelfViewModel
 import com.radium.inkwell.ui.components.Dimens
 import com.radium.inkwell.ui.components.Motion
 import com.radium.inkwell.ui.components.animationsEnabled
-import com.radium.inkwell.ui.components.pagePopTransform
-import com.radium.inkwell.ui.components.pagePredictivePopTransform
-import com.radium.inkwell.ui.components.pagePushTransform
 import com.radium.inkwell.ui.detail.BookDetailScreen
 import com.radium.inkwell.ui.explore.ExploreScreen
 import androidx.navigationevent.NavigationEventTransitionState
@@ -85,8 +82,8 @@ import org.koin.core.parameter.parametersOf
  * - ViewModel 只在 `entry` 内用 [koinViewModel]（`org.koin.compose.viewmodel`）创建，绑到
  *   [rememberViewModelStoreNavEntryDecorator] 提供的 NavEntry 作用域；退栈即清
  * - 宽屏：书架|详情、设置|二级 用 [ListDetailSceneStrategy]；阅读器全屏
- * - 转场：常规页共享轴 X（`pagePushTransform` / `pagePopTransform`，定时长强调减速、不回弹）；
- *   侧滑返回走线性的 `pagePredictivePopTransform`（按手势进度 seek，spring 不跟手）；
+ * - 转场：常规页共享轴 X，位移由 [rememberPageSlideDecorator] 自己做（不回弹的 spring，被打断也不变形）；
+ *   侧滑返回同几何、线性（按手势进度 seek，spring 不跟手）；
  *   进阅读 shared-axis Z（从书封原点缩放）
  */
 @OptIn(ExperimentalMaterial3AdaptiveApi::class)
@@ -114,11 +111,9 @@ fun InkwellNavDisplay() {
     )
     val dualPane = directive.maxHorizontalPartitions > 1
 
-    // Expressive 共享轴横滑（读 MotionScheme）；关动画时主题已换成 InstantMotionScheme，
-    // 不必再分支 instant —— 判两遍等于又造两个来源。
-    val defaultPush = pagePushTransform()
-    val defaultPop = pagePopTransform()
-    val defaultPredictivePop = pagePredictivePopTransform()
+    // 整页横滑：NavDisplay 只拿到「没有内置效果」的转场，位移在页面装饰器里做（见 PageSlide.kt）。
+    // 各个 transitionSpec 只负责记下这次是哪种转场。
+    val pageSlide = remember { PageSlideState() }
     // 侧滑手势是否正在进行。只读 dispatcher 的状态流，不注册处理者，不改变手势归谁。
     val gestures = LocalNavigationEventDispatcherOwner.current?.navigationEventDispatcher
     fun gestureInProgress() =
@@ -126,6 +121,7 @@ fun InkwellNavDisplay() {
 
     val readerMeta = remember(animate, nav) {
         val shrinkBack = {
+            pageSlide.mode = PageSlideMode.None
             if (!animate) {
                 ContentTransform(
                     fadeIn(Motion.instantSpec()),
@@ -140,6 +136,7 @@ fun InkwellNavDisplay() {
             }
         }
         NavDisplay.transitionSpec {
+            pageSlide.mode = PageSlideMode.None
             if (!animate) {
                 ContentTransform(
                     fadeIn(Motion.instantSpec()),
@@ -167,6 +164,7 @@ fun InkwellNavDisplay() {
         entryDecorators = listOf(
             rememberSaveableStateHolderNavEntryDecorator(),
             rememberViewModelStoreNavEntryDecorator(),
+            rememberPageSlideDecorator(pageSlide),
             rememberEntryTraceDecorator(),
         ),
         sceneStrategies = listOf(listDetailStrategy),
@@ -180,20 +178,23 @@ fun InkwellNavDisplay() {
         transitionSpec = {
             if (gestureInProgress()) {
                 NavTrace.specChosen("前进→改侧滑返回", this)
-                defaultPredictivePop
+                pageSlide.mode = PageSlideMode.Predictive
             } else {
                 NavTrace.specChosen("前进", this)
-                defaultPush
+                pageSlide.mode = PageSlideMode.Push
             }
+            PageSlideTransform
         },
         popTransitionSpec = {
             NavTrace.specChosen("返回", this)
-            defaultPop
+            pageSlide.mode = PageSlideMode.Pop
+            PageSlideTransform
         },
         // 侧滑时按手势进度 seek，必须是线性的转场才跟手，见 Motion.PREDICTIVE_BACK_MS
         predictivePopTransitionSpec = { edge ->
             NavTrace.specChosen("侧滑返回·${NavTrace.edgeName(edge)}", this)
-            defaultPredictivePop
+            pageSlide.mode = PageSlideMode.Predictive
+            PageSlideTransform
         },
         entryProvider = entryProvider {
             entry<BookshelfRoute>(
