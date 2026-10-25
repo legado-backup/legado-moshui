@@ -1,5 +1,6 @@
 package com.radium.inkwell.baselineprofile
 
+import android.os.SystemClock
 import androidx.benchmark.macro.MacrobenchmarkScope
 import androidx.benchmark.macro.junit4.BaselineProfileRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -135,10 +136,27 @@ class BaselineProfileGenerator {
         }
         check(menuShown) { "进了阅读页但呼不出阅读菜单：阅读器没排出页，或点中间没反应" }
         device.waitForIdle()
-        back()
-        back()
+        // 不数返回键：菜单此刻可能开着也可能正在收（上面补点那一下可能把它点了回去），
+        // 写死按两下的话，菜单其实已关时第二下就落在书架根页上，把 App 退了 —— CI 上真出过
+        backToBookshelf()
+    }
+
+    /** 按返回直到回到书架；每按一下之前先看是不是已经到了，绝不在书架根页上多按 */
+    private fun MacrobenchmarkScope.backToBookshelf() {
+        repeat(MAX_BACKS) {
+            if (onBookshelf()) return awaitBookshelf()
+            back()
+            device.wait(Until.hasObject(By.desc("搜索")), BACK_SETTLE_MS)
+        }
         awaitBookshelf()
     }
+
+    /**
+     * 书架根页的标志：顶栏的「搜索」与「设置」同时在。只认「设置」不够 ——
+     * 阅读菜单里也有个叫「设置」的按钮，菜单开着时会把阅读页错认成书架
+     */
+    private fun MacrobenchmarkScope.onBookshelf(): Boolean =
+        device.hasObject(By.desc("搜索")) && device.hasObject(By.desc("设置"))
 
     /** 等到元素出现再点。找不到直接失败 —— 见 generate() 里那段「静默跳过 + 返回键退出 App」的事故 */
     private fun MacrobenchmarkScope.tap(selector: BySelector, what: String) {
@@ -153,10 +171,16 @@ class BaselineProfileGenerator {
         device.waitForIdle()
     }
 
-    /** 回到书架根页：以顶栏齿轮为准（多选态下才有的「更多」不能当标志） */
+    /** 回到书架根页：以顶栏的搜索 + 齿轮为准（多选态下才有的「更多」不能当标志），见 [onBookshelf] */
     private fun MacrobenchmarkScope.awaitBookshelf() {
-        check(device.wait(Until.hasObject(By.desc("设置")), UI_TIMEOUT_MS)) {
-            "等不到书架顶栏的设置齿轮：没回到书架，或 App 已经退出"
+        // 轮询两样一起在，而不是 wait 其中一样：搜索页自己也可能有个「搜索」，
+        // 转场没走完时只等到它就往下判，会把「还在路上」误报成「回不去」
+        val deadline = SystemClock.uptimeMillis() + UI_TIMEOUT_MS
+        while (!onBookshelf()) {
+            check(SystemClock.uptimeMillis() < deadline) {
+                "等不到书架顶栏的搜索与设置：没回到书架，或 App 已经退出"
+            }
+            Thread.sleep(POLL_MS)
         }
         device.waitForIdle()
     }
@@ -176,5 +200,10 @@ class BaselineProfileGenerator {
          */
         const val READER_TIMEOUT_MS = 30_000L
         const val MENU_RETRY_MS = 5_000L
+
+        /** 阅读页回书架最多按几下返回：选区 / 菜单 / 阅读页各一层，再留一下余量 */
+        const val MAX_BACKS = 4
+        const val BACK_SETTLE_MS = 3_000L
+        const val POLL_MS = 200L
     }
 }

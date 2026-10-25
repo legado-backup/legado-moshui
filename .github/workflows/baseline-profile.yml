@@ -69,9 +69,10 @@ jobs:
           # 失败时把测试结果 XML 打进日志：Gradle 控制台只说一句「There were failing tests」，
           # 真正的报错（哪个测试、找不到哪个元素）只在 runner 磁盘上的报告里，跑完就没了 ——
           # 8 月那两次失败就是这么看不见原因的。写成一行：这个 action 按行逐条执行 script。
-          # enabledRules=BaselineProfile：同模块的 StartupBenchmark 是计时用的 Macrobenchmark，
-          # 在模拟器上会直接报 EMULATOR 错误把整个任务判失败；只让生成器跑，计时的自动跳过
-          script: ./gradlew :app:generateBaselineProfile -Pandroid.testInstrumentationRunnerArguments.androidx.benchmark.enabledRules=BaselineProfile || (find baselineprofile/build/outputs/androidTest-results -name '*.xml' -exec cat {} + ; exit 1)
+          # 只跑生成器这一个类：同模块的 StartupBenchmark 是计时用的 Macrobenchmark，在模拟器上
+          # 跑不了。试过 enabledRules=BaselineProfile 让它自己跳过，跳是跳了（AssumptionViolated），
+          # 但测试报告把跳过记成了 failure，照样把整个任务判失败
+          script: ./gradlew :app:generateBaselineProfile -Pandroid.testInstrumentationRunnerArguments.class=com.radium.inkwell.baselineprofile.BaselineProfileGenerator || (find baselineprofile/build/outputs/androidTest-results -name '*.xml' -exec cat {} + ; exit 1)
 
       # 同一份报告连同设备日志留作 artifact，日志里看不全时下载这个
       - name: Upload test reports
