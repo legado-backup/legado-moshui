@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -135,6 +137,10 @@ fun BookshelfScreen(
     onOpenSettings: () -> Unit,
     viewModel: BookshelfViewModel,
 ) {
+    // 放在最前面：起点要尽量贴近这次组合开始的时刻。见 ShelfEntryTrace
+    val perf = remember { ShelfEntryTrace() }
+    val gridState = rememberLazyGridState()
+    LaunchedEffect(Unit) { perf.report { gridState.layoutInfo.visibleItemsInfo.size } }
     val books by viewModel.books.collectAsStateWithLifecycle()
     val shelfReady by viewModel.shelfReady.collectAsStateWithLifecycle()
     // 首批书架数据落地再报 fully drawn，启动基准才是「看见书」而不是首帧空白
@@ -274,6 +280,7 @@ fun BookshelfScreen(
                 )
             } else {
                 TopAppBar(
+                    modifier = perf.topBarModifier,
                     title = {
                         // 长按标题 = 隐藏书籍的入口。它本身不可见、不可猜 ——
                         // 一个写在菜单里的「显示隐藏的书」，等于告诉所有人这里藏了东西。
@@ -467,7 +474,8 @@ fun BookshelfScreen(
                         )
                         layout == BookshelfLayout.GRID -> LazyVerticalGrid(
                             columns = GridCells.Adaptive(minSize = Dimens.bookshelfGridMin),
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().then(perf.gridModifier),
+                            state = gridState,
                             // 底部多留一个导航栏的高度：网格铺到屏幕最底边、书封滚到导航条下方，
                             // 而最后一排仍能滚清导航条不被挡住
                             contentPadding = PaddingValues(
