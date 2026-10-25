@@ -150,17 +150,29 @@ fun InkwellNavDisplay() {
             NavDisplay.predictivePopTransitionSpec { shrinkBack() }
     }
 
+    // 侧滑返回卡顿的诊断（见 NavTrace）：手势与返回处理者、选中的转场、页面逐帧位置
+    NavGestureTrace()
     NavDisplay(
         backStack = backStack,
         onBack = { nav.back() },
         entryDecorators = listOf(
             rememberSaveableStateHolderNavEntryDecorator(),
             rememberViewModelStoreNavEntryDecorator(),
+            rememberEntryTraceDecorator(),
         ),
         sceneStrategies = listOf(listDetailStrategy),
-        transitionSpec = { defaultPush },
-        popTransitionSpec = { defaultPop },
-        predictivePopTransitionSpec = { _ -> defaultPop },
+        transitionSpec = {
+            NavTrace.specChosen("前进", this)
+            defaultPush
+        },
+        popTransitionSpec = {
+            NavTrace.specChosen("返回", this)
+            defaultPop
+        },
+        predictivePopTransitionSpec = { edge ->
+            NavTrace.specChosen("侧滑返回·${NavTrace.edgeName(edge)}", this)
+            defaultPop
+        },
         entryProvider = entryProvider {
             entry<BookshelfRoute>(
                 metadata = ListDetailSceneStrategy.listPane(
