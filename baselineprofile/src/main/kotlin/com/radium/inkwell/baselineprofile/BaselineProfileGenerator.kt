@@ -10,6 +10,7 @@ import androidx.test.uiautomator.Until
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.util.regex.Pattern
 
 /**
  * 生成 Baseline Profile：把这段旅程里跑到的类/方法列成清单随包发出去，
@@ -148,6 +149,10 @@ class BaselineProfileGenerator {
         repeat(MAX_BACKS) { i ->
             if (onBookshelf()) return awaitBookshelf()
             trail += "第 ${i + 1} 下返回前 —— ${describeScreen()}"
+            // 返回键会被前台的系统窗口接走、根本到不了阅读器：CI 上第一下关掉菜单后，阅读器进入
+            // 沉浸式全屏，焦点随即落到包名为 android 的系统窗口上（首次全屏的提示，或慢模拟器上的
+            // 无响应对话框），之后三下返回全打在它身上。先把它点掉再按
+            if (dismissSystemWindow()) trail += "  → 点掉了前台的系统窗口"
             back()
             device.wait(Until.hasObject(By.desc("搜索")), BACK_SETTLE_MS)
         }
@@ -183,7 +188,30 @@ class BaselineProfileGenerator {
                 .take(40)
                 .toList()
         }.getOrElse { listOf("（读取失败：${it.javaClass.simpleName}）") }
-        return "当前前台：${device.currentPackageName}；屏上的文字/描述：$labels"
+        val foreground = device.currentPackageName
+        // 前台不是自己时，那个窗口上写了什么才是关键（是全屏提示还是无响应对话框）
+        val foregroundLabels = if (foreground == PACKAGE) "" else runCatching {
+            "；前台窗口上：" + device.findObjects(By.pkg(foreground)).asSequence()
+                .flatMap { sequenceOf(it.contentDescription, it.text) }
+                .filterNotNull()
+                .filter { it.isNotBlank() }
+                .distinct()
+                .take(20)
+                .toList()
+        }.getOrDefault("")
+        return "当前前台：$foreground；屏上的文字/描述：$labels$foregroundLabels"
+    }
+
+    /**
+     * 前台是别人家的窗口（系统的首次全屏提示、无响应对话框）时，点它的确认按钮让焦点回来。
+     * 「等待」而不是「关闭应用」：关了就前功尽弃。点掉了返回 true
+     */
+    private fun MacrobenchmarkScope.dismissSystemWindow(): Boolean {
+        if (device.currentPackageName == PACKAGE) return false
+        val button = device.findObject(By.text(SYSTEM_DISMISS)) ?: return false
+        button.click()
+        device.waitForIdle()
+        return true
     }
 
     private fun MacrobenchmarkScope.back() {
@@ -197,6 +225,7 @@ class BaselineProfileGenerator {
         // 转场没走完时只等到它就往下判，会把「还在路上」误报成「回不去」
         val deadline = SystemClock.uptimeMillis() + UI_TIMEOUT_MS
         while (!onBookshelf()) {
+            dismissSystemWindow()
             check(SystemClock.uptimeMillis() < deadline) {
                 "等不到书架顶栏的搜索与设置：没回到书架，或 App 已经退出。${describeScreen()}$history"
             }
@@ -225,5 +254,9 @@ class BaselineProfileGenerator {
         const val MAX_BACKS = 4
         const val BACK_SETTLE_MS = 3_000L
         const val POLL_MS = 200L
+
+        /** 系统窗口上「放行」的那个按钮：首次全屏提示的「知道了」、无响应对话框的「等待」 */
+        val SYSTEM_DISMISS: Pattern =
+            Pattern.compile("(?i)got it|wait|ok|知道了|我知道了|等待|确定")
     }
 }
