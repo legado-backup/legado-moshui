@@ -3,7 +3,7 @@ name: Baseline Profile
 # 重新生成 Baseline Profile 并开 PR 回写。**手动触发**，通常在发版前跑一次。
 #
 # 为什么不塞进 release.yml、也不开 automaticGenerationDuringBuild：生成器靠 UI 自动化
-# （找「更多」「设置」「书源管理」这些 contentDescription），本来就会飘。绑上发版等于让一个
+# （找「设置」「阅读与规则」「书源管理」这些文字与 contentDescription），本来就会飘。绑上发版等于让一个
 # 会自己坏的东西卡住发版 —— 见 BaselineProfileGenerator 的 KDoc，那里已经论证过一次。
 # 发版只消费签入好的那份 profile，生成失败最多是「这次没更新」，不会连累出包。
 #

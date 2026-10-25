@@ -1,8 +1,10 @@
 package com.radium.inkwell.baselineprofile
 
+import androidx.benchmark.macro.MacrobenchmarkScope
 import androidx.benchmark.macro.junit4.BaselineProfileRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.uiautomator.By
+import androidx.test.uiautomator.BySelector
 import androidx.test.uiautomator.Until
 import org.junit.Rule
 import org.junit.Test
@@ -20,7 +22,7 @@ import org.junit.runner.RunWith
  * ### 这段旅程覆盖了什么、没覆盖什么
  *
  * 覆盖：冷启动（Application/Koin/Room/DataStore）、Compose 起步与首帧、书架、导航转场、
- * 设置、书源管理、搜索页、**阅读器进书与翻页**（夹具 txt，见 [ProfileSeed]）。
+ * 设置（含关于）、阅读与规则 → 书源管理、搜索页、**阅读器进书与翻页**（夹具 txt，见 [ProfileSeed]）。
  * 生成出来的规则量里 compose/ui 仍是大头，进书时占住主线程的也是组合与绘制。
  *
  * 阅读器靠启动 extra 把 `assets/benchmark/seed.txt` 导入书架再点进去，不碰文件选择器、
@@ -87,23 +89,35 @@ class BaselineProfileGenerator {
         }
 
         // 书架首帧。空书架走的是 EmptyState，有书走列表 —— 两条都在冷启动路径上，
-        // 等"更多"按钮出来就说明顶栏已经组合完毕，两条都到位了。
-        device.wait(Until.hasObject(By.desc("更多")), UI_TIMEOUT_MS)
-        device.waitForIdle()
+        // 等顶栏的齿轮出来就说明顶栏已经组合完毕，两条都到位了。
+        awaitBookshelf()
 
-        openFromMenu("设置")
-        openFromMenu("书源管理")
+        // 设置树：一级页 → 关于；一级页 → 阅读与规则 → 书源管理。
+        // 书架上从前是个三点「更多」菜单，2026-07 换成了齿轮。生成器没跟着改，又是 `?.click()`
+        // 找不到就静默跳过 —— 可后面那句 pressBack 照按不误，在书架根页上按返回**直接退出了
+        // App**，之后的搜索、进书、翻页全对着桌面点了个空。生成出来的 profile 于是只剩冷启动
+        // 和书架：设置页 0 条、阅读器 1 条，进设置、进书全回到解释执行，卡顿就是这么来的。
+        // 所以现在一律走 [tap]：找不到就当场失败，宁可这次不更新 profile，也别交一份残缺的。
+        tap(By.desc("设置"), "书架顶栏的设置齿轮")
+        tap(By.text("关于"), "设置 → 关于")
+        back()
+        tap(By.text("阅读与规则"), "设置 → 阅读与规则")
+        tap(By.text("书源管理"), "阅读与规则 → 书源管理")
+        back()
+        back()
+        back()
+        awaitBookshelf()
 
         // 搜索页：进书之外最常走的一条路
-        device.findObject(By.desc("搜索"))?.click()
-        device.waitForIdle()
-        device.pressBack()
-        device.waitForIdle()
+        tap(By.desc("搜索"), "书架顶栏的搜索")
+        back()
+        awaitBookshelf()
 
         // 夹具书：等导入落书架（onCreate 里异步），再点进去覆盖分页/翻页/阅读菜单。
-        device.wait(Until.hasObject(By.text("Benchmark")), UI_TIMEOUT_MS)
-        device.findObject(By.text("Benchmark"))?.click()
-        device.wait(Until.hasObject(By.textContains("第1章")), UI_TIMEOUT_MS)
+        tap(By.text("Benchmark"), "书架上的夹具书（ProfileSeed 导入）")
+        check(device.wait(Until.hasObject(By.textContains("第1章")), UI_TIMEOUT_MS)) {
+            "进书后等不到「第1章」：阅读器没打开，或夹具书没导入成功"
+        }
         device.waitForIdle()
         val w = device.displayWidth
         val h = device.displayHeight
@@ -111,20 +125,29 @@ class BaselineProfileGenerator {
         device.waitForIdle()
         device.click(w / 2, h / 2)
         device.waitForIdle()
-        device.pressBack()
-        device.waitForIdle()
-        device.pressBack()
-        device.wait(Until.hasObject(By.desc("更多")), UI_TIMEOUT_MS)
+        back()
+        back()
+        awaitBookshelf()
     }
 
-    /** 从书架右上角"更多"菜单进某一页，看一眼再退回来 */
-    private fun androidx.benchmark.macro.MacrobenchmarkScope.openFromMenu(item: String) {
-        device.findObject(By.desc("更多"))?.click()
-        device.wait(Until.hasObject(By.text(item)), UI_TIMEOUT_MS)
-        device.findObject(By.text(item))?.click()
+    /** 等到元素出现再点。找不到直接失败 —— 见 generate() 里那段「静默跳过 + 返回键退出 App」的事故 */
+    private fun MacrobenchmarkScope.tap(selector: BySelector, what: String) {
+        val target = device.wait(Until.findObject(selector), UI_TIMEOUT_MS)
+            ?: error("找不到「$what」—— 界面改过了？生成器要跟着改，否则 profile 会悄悄只剩冷启动")
+        target.click()
         device.waitForIdle()
+    }
+
+    private fun MacrobenchmarkScope.back() {
         device.pressBack()
-        device.wait(Until.hasObject(By.desc("更多")), UI_TIMEOUT_MS)
+        device.waitForIdle()
+    }
+
+    /** 回到书架根页：以顶栏齿轮为准（多选态下才有的「更多」不能当标志） */
+    private fun MacrobenchmarkScope.awaitBookshelf() {
+        check(device.wait(Until.hasObject(By.desc("设置")), UI_TIMEOUT_MS)) {
+            "等不到书架顶栏的设置齿轮：没回到书架，或 App 已经退出"
+        }
         device.waitForIdle()
     }
 

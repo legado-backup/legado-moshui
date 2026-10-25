@@ -54,7 +54,7 @@ class StartupBenchmark {
         startActivityAndWait()
         // 等到书架顶栏真的出来再收工。只等 startActivityAndWait 的话，测到的是"窗口出现"，
         // 而用户眼里的"启动完"是内容出现 —— 这中间隔着整个 Compose 首次组合。
-        device.wait(Until.hasObject(By.desc("更多")), 10_000L)
+        device.wait(Until.hasObject(By.desc("设置")), 10_000L)
     }
 
     private companion object {
