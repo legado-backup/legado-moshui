@@ -85,7 +85,7 @@ import org.koin.core.parameter.parametersOf
  * - ViewModel 只在 `entry` 内用 [koinViewModel]（`org.koin.compose.viewmodel`）创建，绑到
  *   [rememberViewModelStoreNavEntryDecorator] 提供的 NavEntry 作用域；退栈即清
  * - 宽屏：书架|详情、设置|二级 用 [ListDetailSceneStrategy]；阅读器全屏
- * - 转场：常规页 Expressive 共享轴 X（`pagePushTransform` / `pagePopTransform`）；
+ * - 转场：常规页共享轴 X（`pagePushTransform` / `pagePopTransform`，定时长强调减速、不回弹）；
  *   侧滑返回走线性的 `pagePredictivePopTransform`（按手势进度 seek，spring 不跟手）；
  *   进阅读 shared-axis Z（从书封原点缩放）
  */
