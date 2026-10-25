@@ -40,9 +40,12 @@ import com.radium.inkwell.ui.components.Dimens
 import com.radium.inkwell.ui.components.Motion
 import com.radium.inkwell.ui.components.animationsEnabled
 import com.radium.inkwell.ui.components.pagePopTransform
+import com.radium.inkwell.ui.components.pagePredictivePopTransform
 import com.radium.inkwell.ui.components.pagePushTransform
 import com.radium.inkwell.ui.detail.BookDetailScreen
 import com.radium.inkwell.ui.explore.ExploreScreen
+import androidx.navigationevent.NavigationEventTransitionState
+import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import com.radium.inkwell.ui.explore.ExploreViewModel
 import com.radium.inkwell.ui.feedback.FeedbackScreen
 import com.radium.inkwell.ui.feedback.FeedbackViewModel
@@ -83,6 +86,7 @@ import org.koin.core.parameter.parametersOf
  *   [rememberViewModelStoreNavEntryDecorator] 提供的 NavEntry 作用域；退栈即清
  * - 宽屏：书架|详情、设置|二级 用 [ListDetailSceneStrategy]；阅读器全屏
  * - 转场：常规页 Expressive 共享轴 X（`pagePushTransform` / `pagePopTransform`）；
+ *   侧滑返回走线性的 `pagePredictivePopTransform`（按手势进度 seek，spring 不跟手）；
  *   进阅读 shared-axis Z（从书封原点缩放）
  */
 @OptIn(ExperimentalMaterial3AdaptiveApi::class)
@@ -114,6 +118,11 @@ fun InkwellNavDisplay() {
     // 不必再分支 instant —— 判两遍等于又造两个来源。
     val defaultPush = pagePushTransform()
     val defaultPop = pagePopTransform()
+    val defaultPredictivePop = pagePredictivePopTransform()
+    // 侧滑手势是否正在进行。只读 dispatcher 的状态流，不注册处理者，不改变手势归谁。
+    val gestures = LocalNavigationEventDispatcherOwner.current?.navigationEventDispatcher
+    fun gestureInProgress() =
+        gestures?.transitionState?.value is NavigationEventTransitionState.InProgress
 
     val readerMeta = remember(animate, nav) {
         val shrinkBack = {
@@ -161,17 +170,30 @@ fun InkwellNavDisplay() {
             rememberEntryTraceDecorator(),
         ),
         sceneStrategies = listOf(listDetailStrategy),
+        // 侧滑手势进行中时，无论 NavDisplay 走到哪个分支都给侧滑转场。
+        //
+        // 前进转场还没收尾（spatial spring 带回弹，尾巴拖几百毫秒）时就开始侧滑，被退回的那页
+        // 还以「退场中」留在 AnimatedContent 里：NavDisplay 先按侧滑取一次转场，紧接着又按「前进」
+        // 再取一次 —— 实测是后者生效，于是旧页往左让、底层页把刚才的退场倒着播回来，方向全反，
+        // 画面卡在半截直到松手。离上次前进不到半秒的侧滑必中（日志里 9～290ms 全部出错，
+        // 790ms 以上全部正常），手快的人进设置就划回来，恰好撞上
         transitionSpec = {
-            NavTrace.specChosen("前进", this)
-            defaultPush
+            if (gestureInProgress()) {
+                NavTrace.specChosen("前进→改侧滑返回", this)
+                defaultPredictivePop
+            } else {
+                NavTrace.specChosen("前进", this)
+                defaultPush
+            }
         },
         popTransitionSpec = {
             NavTrace.specChosen("返回", this)
             defaultPop
         },
+        // 侧滑时按手势进度 seek，必须是线性的转场才跟手，见 Motion.PREDICTIVE_BACK_MS
         predictivePopTransitionSpec = { edge ->
             NavTrace.specChosen("侧滑返回·${NavTrace.edgeName(edge)}", this)
-            defaultPop
+            defaultPredictivePop
         },
         entryProvider = entryProvider {
             entry<BookshelfRoute>(

@@ -10,6 +10,7 @@ import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -115,6 +116,18 @@ object Motion {
      * 没有它，正文在第 210ms 就绪时封面只闪 10ms，比不显示更难看。露了面就至少待满这么久再走。
      */
     const val READER_SPLASH_MIN_MS = 200L
+
+    /**
+     * 侧滑返回（预测性返回）转场的总时长。动效层第二处刻意不走令牌的地方，原因与 spring 的形状有关：
+     *
+     * 侧滑时 NavDisplay 不「播放」转场，而是按手势进度 **seek** 到转场的某个时刻；松手后再用
+     * `tween((1 - 进度) × 总时长)` 把剩下的拖完。spring 的位移曲线前段极陡 —— 实测进度 0.37 时页面
+     * 已冲过屏宽（1286 / 1220）再回弹，手指才划了三分之一画面就到头了，之后怎么拖都不动，像卡住。
+     * 只有线性 tween 能让「进度 = 位移」，页面跟着手指走。
+     *
+     * 300ms 只决定松手后剩余部分走多快（剩一半就是 150ms），与返回箭头那条 spring 收尾观感相近。
+     */
+    const val PREDICTIVE_BACK_MS = 300
 }
 
 /**
@@ -180,6 +193,18 @@ fun pagePopTransform(): ContentTransform {
     val motion = MaterialTheme.motionScheme
     return slideInHorizontally(motion.defaultSpatialSpec()) { -it / 4 } togetherWith
         slideOutHorizontally(motion.fastSpatialSpec()) { it }
+}
+
+/**
+ * 侧滑返回：几何与 [pagePopTransform] 相同（当前页右滑出、底层页从左 1/4 回位），
+ * 只是两段都换成**线性** tween —— 侧滑时转场是按手势进度 seek 的，理由见 [Motion.PREDICTIVE_BACK_MS]。
+ * 系统「移除动画」时时长归零：这里不读 motionScheme，主题那层 InstantMotionScheme 管不到它。
+ */
+@Composable
+fun pagePredictivePopTransform(): ContentTransform {
+    val duration = if (animationsEnabled()) Motion.PREDICTIVE_BACK_MS else 0
+    return slideInHorizontally(tween(duration, easing = LinearEasing)) { -it / 4 } togetherWith
+        slideOutHorizontally(tween(duration, easing = LinearEasing)) { it }
 }
 
 /** 顶栏：从上方滑入 + 淡入 */

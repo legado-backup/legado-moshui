@@ -46,7 +46,10 @@ internal object NavTrace {
 
     /** 场景的可读名字：类名 + key + 里面装着哪些页面 */
     fun describe(scene: Scene<NavKey>): String =
-        "${scene::class.simpleName}(key=${scene.key}, 页面=${scene.entries.map { it.contentKey }})"
+        "${scene.entries.map { shortKey(it.contentKey) }}"
+
+    /** contentKey 形如「BookshelfRoute:class com.radium…BookshelfRoute (…)」，只留冒号前的路由名 */
+    fun shortKey(contentKey: Any): String = contentKey.toString().substringBefore(':')
 
     /**
      * NavDisplay 向我们要转场时调用：记一行「选中了哪套」。它每次转场会调两次
@@ -107,14 +110,14 @@ internal fun rememberEntryTraceDecorator(): NavEntryDecorator<NavKey> = remember
         val running = transition.currentState != transition.targetState
         LaunchedEffect(running) {
             if (!running) return@LaunchedEffect
-            NavTrace.log("页面 ${entry.contentKey} 转场开始：${transition.currentState} → ${transition.targetState}")
+            NavTrace.log("页面 ${NavTrace.shortKey(entry.contentKey)} 转场开始：${transition.currentState} → ${transition.targetState}")
             var lastX = Int.MIN_VALUE
             while (true) {
                 withFrameNanos { }
                 val x = coords[0]?.takeIf { it.isAttached }?.positionInWindow()?.x?.roundToInt() ?: continue
                 // 只记变化的帧：停住不动的那段正是要看的，用「两次记录之间隔了多久」就能读出来
                 if (x != lastX) {
-                    NavTrace.log("页面 ${entry.contentKey} x=$x（${transition.currentState} → ${transition.targetState}）")
+                    NavTrace.log("页面 ${NavTrace.shortKey(entry.contentKey)} x=$x（${transition.currentState} → ${transition.targetState}）")
                     lastX = x
                 }
             }
