@@ -66,6 +66,7 @@ val appModule = module {
     single { ReaderPrefs(androidContext()) }
     single { WebDavPrefs(androidContext()) }
     single { com.radium.inkwell.data.prefs.AppPrefs(androidContext()) }
+    single { com.radium.inkwell.util.RunLogRecorder(androidContext()) }
     single { KeyEventBus() }
     single { ChapterContentCache(java.io.File(androidContext().filesDir, "cache")) }
 
@@ -129,6 +130,7 @@ val appModule = module {
     viewModel { (sourceId: String) -> SourceDetailViewModel(sourceId, get(), get(), get()) }
     viewModel { WebDavViewModel(get(), get(), get(), get()) }
     viewModel { com.radium.inkwell.ui.feedback.FeedbackViewModel(androidContext(), get(), get()) }
+    viewModel { com.radium.inkwell.ui.settings.DeveloperViewModel(get(), get()) }
     viewModel { com.radium.inkwell.ui.replace.ReplaceRuleViewModel(get()) }
     viewModel { com.radium.inkwell.ui.rss.RssSourceViewModel(androidContext(), get()) }
     viewModel { (sourceId: String) -> com.radium.inkwell.ui.rss.RssArticlesViewModel(sourceId, get()) }

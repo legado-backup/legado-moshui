@@ -50,6 +50,8 @@ class AppPrefs(private val context: Context) {
          * 只清进度之前且超过该天数未碰过的缓存，当前章与其后不动。
          */
         val CACHE_AUTO_PRUNE_DAYS = intPreferencesKey("cache_auto_prune_days")
+        val DEVELOPER_MODE = booleanPreferencesKey("developer_mode")
+        val LOG_RECORDING = booleanPreferencesKey("log_recording")
         /** 最后一次改动的时间戳；WebDAV 整块 LWW 靠它裁决 */
         val UPDATED_AT = longPreferencesKey("settings_updated_at")
     }
@@ -218,6 +220,33 @@ class AppPrefs(private val context: Context) {
 
     suspend fun setHiddenRequireAuth(on: Boolean) {
         context.appDataStore.edit { it[Keys.HIDDEN_REQUIRE_AUTH] = on }
+    }
+
+    /**
+     * 开发者模式：关于页连点版本号打开。默认关。
+     *
+     * 与下面的日志开关一样**不进备份、不 touch()**：这是一台设备上为定位问题临时开的，
+     * 同步过去就成了「另一台设备莫名其妙一直在录日志」。
+     */
+    val developerMode: Flow<Boolean> = context.appDataStore.data.map { p ->
+        p[Keys.DEVELOPER_MODE] ?: false
+    }
+
+    /** 关开发者模式时连带关掉日志记录 —— 入口都藏起来了，录制却还在后台跑，用户关不掉 */
+    suspend fun setDeveloperMode(on: Boolean) {
+        context.appDataStore.edit { p ->
+            p[Keys.DEVELOPER_MODE] = on
+            if (!on) p[Keys.LOG_RECORDING] = false
+        }
+    }
+
+    /** 运行日志记录，见 [com.radium.inkwell.util.RunLogRecorder]。只在开发者模式下生效 */
+    val logRecording: Flow<Boolean> = context.appDataStore.data.map { p ->
+        (p[Keys.DEVELOPER_MODE] ?: false) && (p[Keys.LOG_RECORDING] ?: false)
+    }
+
+    suspend fun setLogRecording(on: Boolean) {
+        context.appDataStore.edit { it[Keys.LOG_RECORDING] = on }
     }
 
     val updateChannel: Flow<UpdateChannel> = context.appDataStore.data.map { p ->

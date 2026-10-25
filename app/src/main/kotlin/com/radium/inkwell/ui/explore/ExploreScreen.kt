@@ -35,6 +35,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -81,9 +82,15 @@ fun ExploreScreen(
     }
     // 换源/换分类回到顶部。listState 是跨分类共用的：上一个分类滑到第 40 条，新分类就被夹到
     // 它的最后一屏打开，往往还顺手触发了第 2 页。切换时列表多半还在转圈、没挂上去，
-    // 用 requestScrollToItem —— 它在下一次测量时生效，不要求列表此刻已经布局
+    // 用 requestScrollToItem —— 它在下一次测量时生效，不要求列表此刻已经布局。
+    // 但只在书源/分类「真的变了」时才回顶：点开书再返回，本页会重新进入组合，
+    // LaunchedEffect 跟着重跑一遍，会把 saveable 刚恢复的滚动位置又拽回顶部。
+    // 上次生效的键也得 rememberSaveable，普通 remember 在离开组合时就丢了
+    var scrolledFor by rememberSaveable { mutableStateOf<List<Int>?>(null) }
     LaunchedEffect(state.sourceIndex, state.categoryIndex) {
-        listState.requestScrollToItem(0)
+        val key = listOf(state.sourceIndex, state.categoryIndex)
+        if (scrolledFor != null && scrolledFor != key) listState.requestScrollToItem(0)
+        scrolledFor = key
     }
 
     // 与搜索/书架同一套浅色灰底白卡，避免默认 surface 白底从书行圆角缝里透出来

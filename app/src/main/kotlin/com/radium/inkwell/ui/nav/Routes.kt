@@ -135,6 +135,9 @@ data object FeedbackRoute : NavKey
 @Serializable
 data object DisclaimerRoute : NavKey
 
+@Serializable
+data object DeveloperSettingsRoute : NavKey
+
 /**
  * 设置树里可作为 detail pane 的页面在树中的**层级**（`SettingsRoute` 自身算 1，非设置页为 null）。
  *
@@ -153,7 +156,8 @@ data object DisclaimerRoute : NavKey
  * ├─ WebDAV (2)
  * ├─ 更新 (2)
  * └─ 关于 (2) ─┬ 意见反馈 (3)
- *              └ 免责声明 (3)
+ *              ├ 免责声明 (3)
+ *              └ 开发者选项 (3)
  * ```
  * 加新设置页时**记得在这里登记层级**：漏了会被当成非设置页，宽屏下拿不到 pane。
  *
@@ -174,6 +178,7 @@ internal fun NavKey.settingsDetailDepth(): Int? = when (this) {
     is ThemeSettingsRoute,
     is FeedbackRoute,
     is DisclaimerRoute,
+    is DeveloperSettingsRoute,
     is ReplaceRuleRoute,
     is SourceManageRoute,
     is RssArticlesRoute,

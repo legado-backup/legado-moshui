@@ -285,6 +285,7 @@ fun InkwellNavDisplay() {
                     onBack = { nav.back() },
                     onOpenFeedback = { nav.go(FeedbackRoute) },
                     onOpenDisclaimer = { nav.go(DisclaimerRoute) },
+                    onOpenDeveloper = { nav.go(DeveloperSettingsRoute) },
                 )
             }
             entry<RssSourceRoute>(
@@ -353,6 +354,12 @@ fun InkwellNavDisplay() {
                 metadata = ListDetailSceneStrategy.extraPane(sceneKey = NavPaneGroup.SETTINGS),
             ) {
                 com.radium.inkwell.ui.legal.DisclaimerScreen(onBack = { nav.back() })
+            }
+            entry<DeveloperSettingsRoute>(
+                metadata = ListDetailSceneStrategy.extraPane(sceneKey = NavPaneGroup.SETTINGS),
+            ) {
+                val vm = koinViewModel<com.radium.inkwell.ui.settings.DeveloperViewModel>()
+                com.radium.inkwell.ui.settings.DeveloperSettingsScreen(onBack = { nav.back() }, viewModel = vm)
             }
         },
     )

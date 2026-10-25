@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -55,6 +56,13 @@ fun OptionPickerSheet(
         enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
     )
     val scope = rememberCoroutineScope()
+    // 打开时直接定位到当前选中项：书源一多，每次都从头翻找刚才选的那个很折磨。
+    // 往上留两行余量，让选中项不贴着列表顶边、一眼能看出它前后是谁。
+    // 只取首次组合的初值 —— 面板开着时用户自己滚动不该被拽回去
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = options.indexOfFirst { it.id == selectedId }
+            .let { if (it < 0) 0 else (it - 2).coerceAtLeast(0) },
+    )
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -71,6 +79,7 @@ fun OptionPickerSheet(
             header?.invoke()
             LazyColumn(
                 Modifier.heightIn(max = Dimens.sheetListMaxHeight),
+                state = listState,
                 contentPadding = ContentListDefaults.listContentPadding(),
                 verticalArrangement = Arrangement.spacedBy(ContentListDefaults.ListSpacing),
             ) {

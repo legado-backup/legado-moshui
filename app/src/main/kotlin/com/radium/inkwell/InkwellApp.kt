@@ -4,16 +4,20 @@ import android.app.Application
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.radium.inkwell.data.prefs.AppPrefs
 import com.radium.inkwell.data.prefs.ReaderPrefs
 import com.radium.inkwell.data.prefs.WebDavPrefs
 import com.radium.inkwell.data.repo.BookSourceRepository
 import com.radium.inkwell.data.repo.WebDavRepository
 import com.radium.inkwell.di.appModule
+import com.radium.inkwell.util.RunLogRecorder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
@@ -48,6 +52,15 @@ class InkwellApp : Application(), SingletonImageLoader.Factory {
         //
         // 放在这里，磁盘那一读提前到冷启动；用户点书时 .value 已是真值，只排一遍。
         koin.get<ReaderPrefs>()
+
+        // 开发者模式下的运行日志：开关跟着偏好走，设置页拨开关、关开发者模式都在这里生效。
+        // 放得靠前 —— 越早起 logcat，越不用担心启动那段被系统缓冲区挤掉
+        appScope.launch {
+            val recorder = koin.get<RunLogRecorder>()
+            koin.get<AppPrefs>().logRecording
+                .distinctUntilChanged()
+                .collect { on -> withContext(Dispatchers.IO) { if (on) recorder.start() else recorder.stop() } }
+        }
 
         // 首次启动预置几条常见的广告净化规则（默认关闭，用户自己决定开哪条）
         appScope.launch {
