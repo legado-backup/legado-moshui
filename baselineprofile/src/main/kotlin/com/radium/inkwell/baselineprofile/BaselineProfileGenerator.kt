@@ -6,6 +6,7 @@ import androidx.benchmark.macro.junit4.BaselineProfileRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.BySelector
+import androidx.test.uiautomator.StaleObjectException
 import androidx.test.uiautomator.Until
 import org.junit.Rule
 import org.junit.Test
@@ -168,10 +169,20 @@ class BaselineProfileGenerator {
 
     /** 等到元素出现再点。找不到直接失败 —— 见 generate() 里那段「静默跳过 + 返回键退出 App」的事故 */
     private fun MacrobenchmarkScope.tap(selector: BySelector, what: String) {
-        val target = device.wait(Until.findObject(selector), UI_TIMEOUT_MS)
-            ?: error("找不到「$what」—— 界面改过了？生成器要跟着改，否则 profile 会悄悄只剩冷启动。${describeScreen()}")
-        target.click()
-        device.waitForIdle()
+        // 找到与点下之间页面可能重组（转场还在走、列表刚挂上），手里那个节点随即作废，
+        // click() 抛 StaleObjectException —— CI 第二轮在「书源管理」上真碰到过。重新找一次再点
+        repeat(TAP_ATTEMPTS) { attempt ->
+            val target = device.wait(Until.findObject(selector), UI_TIMEOUT_MS)
+                ?: error("找不到「$what」—— 界面改过了？生成器要跟着改，否则 profile 会悄悄只剩冷启动。${describeScreen()}")
+            try {
+                target.click()
+                device.waitForIdle()
+                return
+            } catch (e: StaleObjectException) {
+                if (attempt == TAP_ATTEMPTS - 1) throw e
+                device.waitForIdle()
+            }
+        }
     }
 
     /**
@@ -209,9 +220,10 @@ class BaselineProfileGenerator {
     private fun MacrobenchmarkScope.dismissSystemWindow(): Boolean {
         if (device.currentPackageName == PACKAGE) return false
         val button = device.findObject(By.text(SYSTEM_DISMISS)) ?: return false
-        button.click()
+        // 系统窗口自己也可能刚好在消失，节点作废就当没点到，下一轮再看
+        val clicked = runCatching { button.click() }.isSuccess
         device.waitForIdle()
-        return true
+        return clicked
     }
 
     private fun MacrobenchmarkScope.back() {
@@ -254,6 +266,7 @@ class BaselineProfileGenerator {
         const val MAX_BACKS = 4
         const val BACK_SETTLE_MS = 3_000L
         const val POLL_MS = 200L
+        const val TAP_ATTEMPTS = 3
 
         /** 系统窗口上「放行」的那个按钮：首次全屏提示的「知道了」、无响应对话框的「等待」 */
         val SYSTEM_DISMISS: Pattern =
