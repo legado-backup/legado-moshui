@@ -70,7 +70,14 @@ val appModule = module {
     single { KeyEventBus() }
     single { ChapterContentCache(java.io.File(androidContext().filesDir, "cache")) }
 
-    single { SourceHttpClient() }
+    // 抓取日志接到 logcat：成功 debug、失败/重试 warn。开发者模式的运行日志录的就是 logcat
+    single {
+        SourceHttpClient(
+            logger = { warn, msg, e ->
+                if (warn) android.util.Log.w("SourceHttp", msg, e) else android.util.Log.d("SourceHttp", msg)
+            },
+        )
+    }
     // Rhino 解释执行 JS 规则（与 Legado 同引擎）
     single<com.radium.inkwell.core.source.js.ScriptRuntime> {
         com.radium.inkwell.core.source.js.RhinoScriptRuntime()

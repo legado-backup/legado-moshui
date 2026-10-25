@@ -51,6 +51,7 @@ import com.radium.inkwell.ui.components.ChipRow
 import com.radium.inkwell.ui.components.CollectMessages
 import com.radium.inkwell.ui.components.ContentListDefaults
 import com.radium.inkwell.ui.components.EmptyState
+import com.radium.inkwell.ui.components.ErrorState
 import com.radium.inkwell.ui.components.LoadingState
 import com.radium.inkwell.ui.components.OptionPickerSheet
 import com.radium.inkwell.ui.components.PickerOption
@@ -149,6 +150,10 @@ fun ExploreScreen(
 
             when {
                 state.loading -> LoadingState()
+                state.error != null -> ErrorState(
+                    message = state.error.orEmpty(),
+                    onRetry = { viewModel.retry() },
+                )
                 state.books.isEmpty() -> EmptyState(
                     icon = Icons.Default.Explore,
                     title = "这个分类没有内容",

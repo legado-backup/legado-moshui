@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.collectLatest
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.radium.inkwell.core.source.BookSourceEngine
@@ -40,6 +41,12 @@ data class ExploreUiState(
     val hasMore: Boolean = false,
     val loading: Boolean = false,
     val loadingMore: Boolean = false,
+    /**
+     * 首页加载失败的原因；非空时页面显示错误态而不是「这个分类没有内容」。
+     * 从前失败也落到空态，只在底部闪一条 Snackbar —— 提示一消失，满屏写的是「没有内容」，
+     * 被掐断的网络看起来像是分类本来就空。加载更多失败不进这里：已有的书还在，弹提示即可
+     */
+    val error: String? = null,
     /** 正在加入书架的那几本（bookUrl）。可以同时加好几本 */
     val addingUrls: Set<String> = emptySet(),
     /** 书架已有书的 (书名,作者) 键；列表据此把已在架的书显示为"已加入" */
@@ -139,6 +146,7 @@ class ExploreViewModel(
                 loading = reset,
                 loadingMore = !reset,
                 books = if (reset) emptyList() else _state.value.books,
+                error = if (reset) null else _state.value.error,
             )
             runCatching { engine.explore(rule, s.categoryIndex, page) }
                 .onSuccess { result ->
@@ -162,8 +170,15 @@ class ExploreViewModel(
                     // 不先摘出来的话：用户每切一次分类就弹一条"加载失败"，而且这条僵尸协程还会把
                     // loading 抹成 false —— 新一轮明明在转圈，转圈却没了。
                     if (e is CancellationException) throw e
-                    _state.value = _state.value.copy(loading = false, loadingMore = false)
-                    messages.emit("加载失败: ${e.message?.take(80)}")
+                    // 抓取层已记下地址与异常链（SourceHttp），这里补上是哪个源、哪个分类、第几页
+                    Log.w(TAG, "发现页加载失败：书源「${source.name}」分类「${s.categories.getOrNull(s.categoryIndex)}」第 $page 页", e)
+                    val reason = e.message?.take(80) ?: e.javaClass.simpleName
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        loadingMore = false,
+                        error = if (reset) reason else _state.value.error,
+                    )
+                    if (!reset) messages.emit("加载失败: $reason")
                 }
         }
     }
@@ -194,4 +209,7 @@ class ExploreViewModel(
         }
     }
 
+    private companion object {
+        const val TAG = "Explore"
+    }
 }

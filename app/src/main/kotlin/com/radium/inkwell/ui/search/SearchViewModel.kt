@@ -1,5 +1,6 @@
 package com.radium.inkwell.ui.search
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.radium.inkwell.core.source.BookSourceEngine
@@ -503,6 +504,8 @@ class SearchViewModel(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // 界面上照旧静默（几十个源里挂几个是常态），但日志里得留下是哪个源、为什么
+            Log.w(TAG, "搜索失败：书源「${rule.name}」第 $page 页", e)
             null
         }
 
@@ -571,6 +574,7 @@ class SearchViewModel(
     }
 
     companion object {
+        private const val TAG = "Search"
         private const val SEARCH_TIMEOUT_MS = 30_000L
         private const val PUBLISH_DEBOUNCE_MS = 250L
         /** 详情+目录两个请求；三个源串起来不超过一分钟 */

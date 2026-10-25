@@ -8,6 +8,8 @@ import okio.Buffer
 import org.junit.After
 import org.junit.Before
 import java.io.IOException
+import java.net.SocketException
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -181,5 +183,53 @@ class SourceHttpClientTest {
         val page = client().fetch(server.url("/from").toString())
         assertTrue(page.finalUrl.endsWith("/target"))
         assertEquals("landed", page.bodyText)
+    }
+
+    /** 前 [times] 次请求在拦截器里直接抛 RST，模拟被对端/中间设备掐断 */
+    private fun resettingClient(times: Int, logs: MutableList<Pair<Boolean, String>>, calls: AtomicInteger) =
+        SourceHttpClient(
+            OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    if (calls.incrementAndGet() <= times) throw SocketException("Connection reset")
+                    chain.proceed(chain.request())
+                }
+                .build(),
+            retryBaseDelayMs = 1,
+            allowPrivateNetwork = true,
+            logger = { warn, msg, _ -> synchronized(logs) { logs += warn to msg } },
+        )
+
+    @Test
+    fun `get reset once is retried and logged`() = runBlocking {
+        server.enqueue(MockResponse().setBody("ok"))
+        val logs = mutableListOf<Pair<Boolean, String>>()
+        val calls = AtomicInteger()
+        val page = resettingClient(1, logs, calls).fetch(server.url("/").toString())
+        assertEquals("ok", page.bodyText)
+        assertEquals(2, calls.get())
+        assertTrue(logs.any { it.first && it.second.contains("Connection reset") })
+        // 成功那条是 debug 级，带状态码
+        assertTrue(logs.any { !it.first && it.second.contains("HTTP 200") })
+    }
+
+    @Test
+    fun `get reset twice gives up after one retry`() = runBlocking {
+        val logs = mutableListOf<Pair<Boolean, String>>()
+        val calls = AtomicInteger()
+        assertFailsWith<SocketException> {
+            resettingClient(5, logs, calls).fetch(server.url("/").toString())
+        }
+        assertEquals(2, calls.get())
+        assertTrue(logs.last().first && logs.last().second.contains("请求失败"))
+    }
+
+    @Test
+    fun `post reset is not replayed`() = runBlocking {
+        val logs = mutableListOf<Pair<Boolean, String>>()
+        val calls = AtomicInteger()
+        assertFailsWith<SocketException> {
+            resettingClient(1, logs, calls).fetch(server.url("/").toString(), method = "POST", body = "a=1")
+        }
+        assertEquals(1, calls.get())
     }
 }

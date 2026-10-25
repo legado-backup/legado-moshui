@@ -19,11 +19,28 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.Buffer
+import java.io.EOFException
 import java.io.IOException
+import java.net.SocketException
 import java.nio.charset.Charset
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.toJavaDuration
+
+/**
+ * 抓取日志出口。core 是纯 JVM，碰不到 android.util.Log，由 app 注入（见 AppModules）。
+ *
+ * 从前抓取失败一行日志都不留：发现页弹一句「加载失败: Connection reset」，开发者模式导出的
+ * 日志里却找不到是哪个地址、哪一步、裹着什么异常被掐的 —— 只能对着报错猜。
+ */
+fun interface SourceHttpLogger {
+    /** [warn] = 失败或重试；成功的那条为 false，量大，接成 debug 级 */
+    fun log(warn: Boolean, message: String, error: Throwable?)
+
+    companion object {
+        val NONE = SourceHttpLogger { _, _, _ -> }
+    }
+}
 
 /** 抓取结果；bodyText 已按探测到的字符集解码。不再同时握一份 bodyBytes —— 解码后那份字节只是峰值翻倍。 */
 class FetchedPage(
@@ -40,7 +57,8 @@ class FetchedPage(
  * - 默认移动端 Chrome UA（调用方未提供时）
  * - 按 host 的内存 CookieJar
  * - 按 host 的令牌桶限速（suspend delay 实现）
- * - 403/429 指数退避重试 2 次
+ * - 403/429 指数退避重试 2 次；连接被对端掐断（RST / 半路断流）的 GET 再试 1 次
+ * - 每次抓取的结果与失败经 [SourceHttpLogger] 吐出去（app 接到 logcat，开发者模式导出的日志里就有）
  * - 字符集三级探测：声明 > Content-Type > 前 8KB meta 嗅探；GBK/GB2312 按 GB18030 解码
  */
 class SourceHttpClient(
@@ -48,6 +66,7 @@ class SourceHttpClient(
     private val retryBaseDelayMs: Long = 500,
     /** 允许书源访问内网地址。**只该在测试里开**（MockWebServer 跑在 127.0.0.1 上） */
     allowPrivateNetwork: Boolean = false,
+    private val logger: SourceHttpLogger = SourceHttpLogger.NONE,
 ) {
 
     private val cookieJar = MemoryCookieJar()
@@ -103,19 +122,50 @@ class SourceHttpClient(
             buckets.computeIfAbsent(httpUrl.host) { TokenBucket(rateLimit) }.acquire()
         }
         var attempt = 0
+        var disconnectRetried = false
         while (true) {
             val request = buildRequest(httpUrl, method, body, headers, charsetOverride)
-            val response = execute(client.newCall(request))
+            val startNs = System.nanoTime()
+            val response = try {
+                execute(client.newCall(request))
+            } catch (e: IOException) {
+                // 握手/发请求时被 RST（报错就是一句干巴巴的「Connection reset」）多半是瞬时的：
+                // 连接池里的旧连接被服务端单方面关了、移动网络切基站。再试一次就好，用户却得
+                // 自己点重试。只重试 GET/HEAD —— POST 可能已经送达，重放会把提交做两遍。
+                // 一次为限：被防火墙或 WAF 稳定掐断的站，再试多少次都一样，只是让人多等。
+                if (!disconnectRetried && method.isIdempotent() && e.isDisconnect()) {
+                    disconnectRetried = true
+                    logger.log(true, "$method $url 连接被断开（${e.describe()}），重试一次", e)
+                    delay(retryBaseDelayMs)
+                    continue
+                }
+                logger.log(true, "$method $url 请求失败（${elapsedMs(startNs)}ms）: ${e.describe()}", e)
+                throw e
+            }
             if (response.code in RETRY_CODES && attempt < MAX_RETRIES) {
+                logger.log(true, "$method $url → HTTP ${response.code}，第 ${attempt + 1} 次退避重试", null)
                 response.close()
                 delay(retryBaseDelayMs shl attempt) // 指数退避：base、base*2
                 attempt++
                 continue
             }
             response.use { resp ->
-                if (throwOnHttpError && !resp.isSuccessful) throw IOException("HTTP ${resp.code}: $url")
-                val bytes = withContext(Dispatchers.IO) { readBounded(resp, url) }
+                if (throwOnHttpError && !resp.isSuccessful) {
+                    logger.log(true, "$method $url → HTTP ${resp.code}（${elapsedMs(startNs)}ms）", null)
+                    throw IOException("HTTP ${resp.code}: $url")
+                }
+                val bytes = try {
+                    withContext(Dispatchers.IO) { readBounded(resp, url) }
+                } catch (e: IOException) {
+                    logger.log(true, "$method $url → HTTP ${resp.code}，读响应体失败: ${e.describe()}", e)
+                    throw e
+                }
                 val charset = detectCharset(charsetOverride, resp.header("Content-Type"), bytes)
+                logger.log(
+                    false,
+                    "$method $url → HTTP ${resp.code}（${elapsedMs(startNs)}ms，${bytes.size} B，${charset.name()}）",
+                    null,
+                )
                 return FetchedPage(
                     finalUrl = resp.request.url.toString(),
                     statusCode = resp.code,
@@ -151,6 +201,26 @@ class SourceHttpClient(
                 }
             })
         }
+
+    private fun elapsedMs(startNs: Long): Long = (System.nanoTime() - startNs) / 1_000_000
+
+    private fun String.isIdempotent(): Boolean =
+        equals("GET", ignoreCase = true) || equals("HEAD", ignoreCase = true)
+
+    /**
+     * 连接被对端/中间设备掐断：RST（`SocketException: Connection reset`，TLS 握手时被掐会裹在
+     * SSLException 里）或半路断流（`unexpected end of stream`，裹着 EOFException）。
+     * 超时不算 —— `SocketTimeoutException` 不是 SocketException 的子类，已经干等了十几秒的
+     * 请求再来一遍只会让人等双倍。
+     */
+    private fun IOException.isDisconnect(): Boolean =
+        generateSequence<Throwable>(this) { it.cause }.take(8)
+            .any { it is SocketException || it is EOFException }
+
+    /** 日志里要有异常类型：同样一句「Connection reset」，裸 Socket 与 SSL 握手里被掐是两回事 */
+    private fun Throwable.describe(): String =
+        generateSequence(this) { it.cause }.take(4)
+            .joinToString(" ← ") { "${it.javaClass.simpleName}: ${it.message}" }
 
     /**
      * 有上限地读响应体。书源指向的是任意第三方 URL：规则写错指到大文件直链、或恶意源
