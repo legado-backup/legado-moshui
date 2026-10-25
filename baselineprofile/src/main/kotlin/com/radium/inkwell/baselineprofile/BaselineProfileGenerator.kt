@@ -114,16 +114,26 @@ class BaselineProfileGenerator {
         awaitBookshelf()
 
         // 夹具书：等导入落书架（onCreate 里异步），再点进去覆盖分页/翻页/阅读菜单。
-        tap(By.text("Benchmark"), "书架上的夹具书（ProfileSeed 导入）")
-        check(device.wait(Until.hasObject(By.textContains("第1章")), UI_TIMEOUT_MS)) {
-            "进书后等不到「第1章」：阅读器没打开，或夹具书没导入成功"
+        //
+        // 进没进书分两段确认，各报各的错：从前只等正文里的「第1章」，等不到时分不清是「点了
+        // 没离开书架」还是「进了阅读器但字没读到 / 排版太慢」。阅读器正文画在画布上，
+        // 能稳妥认出来的是阅读菜单里的「退出阅读」按钮 —— 顺带把菜单也收进 profile。
+        tap(By.text(SEED_TITLE), "书架上的夹具书（ProfileSeed 导入）")
+        check(device.wait(Until.gone(By.desc("搜索")), UI_TIMEOUT_MS)) {
+            "点了夹具书却没离开书架：书卡点击没打开阅读器"
         }
         device.waitForIdle()
         val w = device.displayWidth
         val h = device.displayHeight
         device.swipe((w * 0.85f).toInt(), h / 2, (w * 0.2f).toInt(), h / 2, 25)
         device.waitForIdle()
-        device.click(w / 2, h / 2)
+        // 页还没排出来时点中间会被吞掉，只点一次就可能白等满超时 —— 隔一段补点一下，
+        // 间隔放宽到 5 秒，免得菜单刚慢吞吞地弹出来就被下一下点回去
+        val menuShown = (1..READER_TIMEOUT_MS / MENU_RETRY_MS).any {
+            device.click(w / 2, h / 2)
+            device.wait(Until.hasObject(By.desc("退出阅读")), MENU_RETRY_MS)
+        }
+        check(menuShown) { "进了阅读页但呼不出阅读菜单：阅读器没排出页，或点中间没反应" }
         device.waitForIdle()
         back()
         back()
@@ -154,7 +164,17 @@ class BaselineProfileGenerator {
     private companion object {
         const val PACKAGE = "com.radium.inkwell"
 
+        /** 与 app 里 ProfileSeed.TITLE 一致 */
+        const val SEED_TITLE = "Benchmark"
+
         /** 等 UI 出现的上限。生成跑在模拟器上，比真机慢，给宽一点；卡住了宁可失败也别静默少收 */
         const val UI_TIMEOUT_MS = 10_000L
+
+        /**
+         * 阅读器首屏要导入、分章、排版：生成时代码被重置成解释执行，模拟器又是软件渲染，
+         * 比别的页慢得多，单独放宽
+         */
+        const val READER_TIMEOUT_MS = 30_000L
+        const val MENU_RETRY_MS = 5_000L
     }
 }
