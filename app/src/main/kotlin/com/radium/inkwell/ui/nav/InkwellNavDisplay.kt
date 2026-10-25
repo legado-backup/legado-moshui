@@ -156,8 +156,6 @@ fun InkwellNavDisplay() {
             NavDisplay.predictivePopTransitionSpec { shrinkBack() }
     }
 
-    // 侧滑返回卡顿的诊断（见 NavTrace）：手势与返回处理者、选中的转场、页面逐帧位置
-    NavGestureTrace()
     NavDisplay(
         backStack = backStack,
         onBack = { nav.back() },
@@ -165,7 +163,6 @@ fun InkwellNavDisplay() {
             rememberSaveableStateHolderNavEntryDecorator(),
             rememberViewModelStoreNavEntryDecorator(),
             rememberPageSlideDecorator(pageSlide),
-            rememberEntryTraceDecorator(),
         ),
         sceneStrategies = listOf(listDetailStrategy),
         // 侧滑手势进行中时，无论 NavDisplay 走到哪个分支都给侧滑转场。
@@ -176,23 +173,16 @@ fun InkwellNavDisplay() {
         // 画面卡在半截直到松手。离上次前进不到半秒的侧滑必中（日志里 9～290ms 全部出错，
         // 790ms 以上全部正常），手快的人进设置就划回来，恰好撞上
         transitionSpec = {
-            if (gestureInProgress()) {
-                NavTrace.specChosen("前进→改侧滑返回", this)
-                pageSlide.mode = PageSlideMode.Predictive
-            } else {
-                NavTrace.specChosen("前进", this)
-                pageSlide.mode = PageSlideMode.Push
-            }
+            pageSlide.mode =
+                if (gestureInProgress()) PageSlideMode.Predictive else PageSlideMode.Push
             PageSlideTransform
         },
         popTransitionSpec = {
-            NavTrace.specChosen("返回", this)
             pageSlide.mode = PageSlideMode.Pop
             PageSlideTransform
         },
         // 侧滑时按手势进度 seek，必须是线性的转场才跟手，见 Motion.PREDICTIVE_BACK_MS
-        predictivePopTransitionSpec = { edge ->
-            NavTrace.specChosen("侧滑返回·${NavTrace.edgeName(edge)}", this)
+        predictivePopTransitionSpec = { _ ->
             pageSlide.mode = PageSlideMode.Predictive
             PageSlideTransform
         },
