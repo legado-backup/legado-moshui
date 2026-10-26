@@ -124,6 +124,14 @@ class SearchViewModel(
     /** 暂停时拍下还没跑完的源；返回列表后 [resumeSearch] 接着跑，不重开一轮、不清已有结果 */
     private var paused: PausedSearch? = null
 
+    /**
+     * 当前这批结果是用哪个词搜出来的。翻页、暂停/继续、换排序都必须用它，**不能**读 [SearchUiState.query]：
+     * 那是输入框的实时内容，每敲一个字就变。搜完「A」再把框里改成「B」（还没回车）就滑到底，
+     * 第 2 页会按「B」去搜、并进「A」的列表；点开一本再返回点「继续搜索」也一样串词；
+     * 清空输入框再滑到底，则是拿空关键词去搜。
+     */
+    private var activeKeyword: String = ""
+
     private data class PausedSearch(
         val remaining: List<BookSourceRule>,
         val alreadyMore: List<BookSourceRule>,
@@ -183,7 +191,7 @@ class SearchViewModel(
         if (sort == _state.value.sort) return
         sortJob?.cancel()
         publishJob?.cancel()
-        val keyword = _state.value.query.trim()
+        val keyword = activeKeyword
         val sortId = _state.value.sortId + 1
         // 先拍快照再丢到 Default：Collator 拼音排几百上千条会卡住主线程，
         // 底部面板关动画也会跟着一顿。标签先切过去，列表排完再换。
@@ -221,6 +229,7 @@ class SearchViewModel(
                 )
                 return@launch
             }
+            activeKeyword = keyword
             hitsMutex.withLock { hits.clear() }
             moreAcc.clear()
             pagingRules = emptyList()
@@ -253,7 +262,7 @@ class SearchViewModel(
             remaining = remaining,
             alreadyMore = moreAcc.toList(),
             fetchPage = inFlightPage,
-            keyword = s.query.trim(),
+            keyword = activeKeyword,
             searchId = s.searchId,
         ).takeIf { remaining.isNotEmpty() }
         // 让还在飞的旧协程别再往 moreAcc / pending 里写；searchId 没变，已完成的 merge 仍可进 hits
@@ -271,7 +280,7 @@ class SearchViewModel(
             )
         }
         val searchId = s.searchId
-        val keyword = s.query.trim()
+        val keyword = activeKeyword
         viewModelScope.launch {
             val snapshot = hitsMutex.withLock { hits.values.toList() }
             val sorted = orderedNow(snapshot, keyword)
@@ -514,8 +523,10 @@ class SearchViewModel(
 
     fun loadMore() {
         val s = _state.value
-        if (s.searching || s.loadingMore || s.searchPaused || !s.hasMore || pagingRules.isEmpty()) return
-        val keyword = s.query.trim()
+        val keyword = activeKeyword
+        if (s.searching || s.loadingMore || s.searchPaused || !s.hasMore || pagingRules.isEmpty() ||
+            keyword.isEmpty()
+        ) return
         val next = s.page + 1
         val rules = pagingRules.toList()
         pagingJob?.cancel()
