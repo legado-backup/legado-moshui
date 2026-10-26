@@ -1,6 +1,5 @@
 package com.radium.inkwell.data.repo
 
-import java.io.File
 import com.radium.inkwell.core.source.BookSourceTypes
 import com.radium.inkwell.core.webdav.BackupBook
 import com.radium.inkwell.core.webdav.BackupCodec
@@ -49,6 +48,7 @@ class WebDavRepository(
     private val appPrefs: AppPrefs,
     private val replaceRules: ReplaceRuleRepository,
     private val localNetwork: LocalNetworkAccess,
+    private val bookRepo: BookRepository,
 ) {
     private companion object {
         const val DIR = "inkwell"
@@ -231,12 +231,8 @@ class WebDavRepository(
         }
         if (remotelyDeleted.isNotEmpty()) {
             withContext(Dispatchers.IO) {
-                remotelyDeleted.forEach { book ->
-                    book.localPath?.let { File(it).delete() }
-                    // 网络书的 coverPath 存的是远程 URL，不是文件
-                    if (book.type != BookType.NET) book.coverPath?.let { File(it).delete() }
-                    cache.clear(book.id)
-                }
+                // 和本地删书同一条路：路径限定在应用自己的目录里，同步来的行改不了删哪
+                remotelyDeleted.forEach { bookRepo.deleteLocalFiles(it) }
             }
         }
         merged.readerSettings?.let { readerPrefs.importFromBackup(it) }
@@ -273,7 +269,7 @@ class WebDavRepository(
                     meta.copy(
                         // 只补空，不覆盖：本地书这一列是有效的本机文件路径，
                         // 而远端对本地书永远给 null —— 拿 null 盖上去等于把封面弄丢。
-                        coverPath = existing.coverPath ?: b.coverUrl,
+                        coverPath = existing.coverPath ?: remoteCover(b),
                         // 换了源就按新源的章节数来，旧源的更大值对新目录没有意义
                         totalChapters = if (sourceChanged) b.totalChapters else maxOf(existing.totalChapters, b.totalChapters),
                         readChapterIndex = if (takeProgress) b.readChapterIndex else existing.readChapterIndex,
@@ -286,7 +282,7 @@ class WebDavRepository(
                 bookDao.upsert(
                     BookEntity(
                         id = b.id, type = b.type, title = b.title, author = b.author,
-                        intro = b.intro, localPath = null, coverPath = b.coverUrl,
+                        intro = b.intro, localPath = null, coverPath = remoteCover(b),
                         sourceId = b.sourceId, bookUrl = b.bookUrl, tocUrl = b.tocUrl,
                         totalChapters = b.totalChapters,
                         readChapterIndex = b.readChapterIndex, readCharOffset = b.readCharOffset,
@@ -302,6 +298,13 @@ class WebDavRepository(
             }
         }
     }
+
+    /**
+     * 远端封面只对网络书采纳 —— 与导出侧 [buildLocalPayload] 的约定一致：本地书的封面是本机路径，
+     * 导出时永远给 null。本地书却带着一个「封面」，只可能是被改过的备份；而本地书的 coverPath
+     * 会被当成本机文件读、删，不能让备份往里填路径。
+     */
+    private fun remoteCover(b: BackupBook): String? = b.coverUrl?.takeIf { b.type == BookType.NET }
 
     private suspend fun applySources(merged: BackupMerger.MergeResult) {
         merged.changedSources.forEach { s ->

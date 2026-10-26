@@ -23,7 +23,18 @@ class ChapterContentCache(private val root: File) {
     private val digest = ThreadLocal.withInitial { MessageDigest.getInstance("MD5") }
     private val touched = ConcurrentHashMap.newKeySet<String>()
 
-    private fun dir(bookId: String): File = File(root, bookId).apply { mkdirs() }
+    private fun dir(bookId: String): File = bookDir(bookId).apply { mkdirs() }
+
+    /**
+     * 书 id 拼进路径之前先过一道：id 不全是本机生成的 —— WebDAV 同步来的书行出自备份文件，
+     * 谁能写备份谁就能填（明文 http 下还有中间人）。`../books` 这样的 id 原样拼进去，
+     * [clear] 的 deleteRecursively 就删到缓存根之外（整个导入书目录）。
+     *
+     * 本机生成的 id 只有 UUID（本地书）和 MD5 hex（网络书），原样用，老缓存目录不用搬；
+     * 其余一律换成 `_` + MD5 —— 照常能存能取，只是落不到 [root] 之外。
+     */
+    private fun bookDir(bookId: String): File =
+        File(root, if (SAFE_ID.matches(bookId)) bookId else "_" + key(bookId))
 
     private fun file(bookId: String, chapterUrl: String): File =
         File(dir(bookId), key(chapterUrl) + ".txt")
@@ -148,7 +159,7 @@ class ChapterContentCache(private val root: File) {
     ): List<Int> {
         if (maxAgeMs <= 0L) return emptyList()
         val cutoff = nowMs - maxAgeMs
-        val bookDir = File(root, bookId)
+        val bookDir = bookDir(bookId)
         if (!bookDir.isDirectory) return emptyList()
 
         val liveKeys = chapterUrls.mapNotNullTo(HashSet()) { url ->
@@ -207,5 +218,7 @@ class ChapterContentCache(private val root: File) {
         const val ESCAPE = "\u0001"
         /** 标题行：`H` + 一或多位数字 + `:` */
         val HEAD_REGEX = Regex("H\\d+:")
+        /** 能直接当目录名的书 id：本机生成的 UUID / MD5 hex 都落在这里面，不含 `.` 与路径分隔符 */
+        val SAFE_ID = Regex("[A-Za-z0-9-]+")
     }
 }

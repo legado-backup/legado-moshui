@@ -202,4 +202,34 @@ class ChapterContentCacheTest {
         assertFalse(orphan.exists())
         assertTrue(cache.has("b1", "https://ex.com/live.html"))
     }
+
+    /**
+     * 书 id 可能来自同步下来的备份文件，不是本机生成的。`../books` 原样拼进路径的话，
+     * clear() 的 deleteRecursively 会删到缓存根之外 —— 正是缓存根的兄弟目录 books/（所有导入的书）。
+     */
+    @Test
+    fun `越界的书 id 删不到缓存根之外`() {
+        val parent = Files.createTempDirectory("files-test").toFile()
+        val cacheRoot = File(parent, "cache").apply { mkdirs() }
+        val books = File(parent, "books").apply { mkdirs() }
+        val imported = File(books, "real.epub").apply { writeText("book") }
+        val c = ChapterContentCache(cacheRoot)
+
+        c.write("../books", "https://ex.com/1.html", content)
+        assertTrue(c.has("../books", "https://ex.com/1.html"))
+        c.clear("../books")
+
+        assertTrue(imported.exists())
+        assertFalse(c.has("../books", "https://ex.com/1.html"))
+    }
+
+    @Test
+    fun `本机生成的书 id 仍按原名落目录，老缓存不用搬`() {
+        val uuid = "0b6f1c7e-3c1a-4f7e-9a51-2d2f6c7f9e10"
+        val md5 = "9e107d9d372bb6826bd81d3542a419d6"
+        cache.write(uuid, "https://ex.com/1.html", content)
+        cache.write(md5, "https://ex.com/1.html", content)
+        assertTrue(File(root, uuid).isDirectory)
+        assertTrue(File(root, md5).isDirectory)
+    }
 }

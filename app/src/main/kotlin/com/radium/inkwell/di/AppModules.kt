@@ -115,13 +115,13 @@ val appModule = module {
     single { com.radium.inkwell.update.UpdateInstaller(get()) }
     single { com.radium.inkwell.update.UpdateManager(get(), get(), get()) }
 
-    single { BookRepository(androidContext(), get(), get(), get(), get(), get(), get()) }
+    single { BookRepository(androidContext(), get(), get(), get(), get(), get(), get(), get()) }
     single { BookSourceRepository(get(), get()) }
     single { ReplaceRuleRepository(get()) }
     single { NetBookRepository(get(), get(), get(), get(), get()) }
     single { AutoSourceSwitcher(get(), get()) }
     single { com.radium.inkwell.util.LocalNetworkAccess(androidContext()) }
-    single { WebDavRepository(get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get()) }
+    single { WebDavRepository(get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get()) }
     single { com.radium.inkwell.data.net.OfficialWebDavClient(get()) }
     single { com.radium.inkwell.data.repo.OfficialWebDavRepository(get(), get()) }
 

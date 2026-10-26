@@ -29,6 +29,7 @@ class BookRepository(
     private val hitDao: BookSourceHitDao,
     private val replaceRuleDao: ReplaceRuleDao,
     private val parserRegistry: BookParserRegistry,
+    private val cache: ChapterContentCache,
 ) {
 
     val books: Flow<List<BookEntity>> = bookDao.observeAll()
@@ -201,9 +202,7 @@ class BookRepository(
     suspend fun discardUnshelved(id: String) = withContext(Dispatchers.IO) {
         val book = bookDao.getById(id) ?: return@withContext
         if (book.inShelf) return@withContext
-        book.localPath?.let { File(it).delete() }
-        book.coverPath?.let { File(it).delete() }
-        File(File(context.filesDir, "cache"), id).deleteRecursively()
+        deleteLocalFiles(book)
         val now = System.currentTimeMillis()
         db.withWriteTransaction {
             chapterDao.deleteByBook(id)
@@ -215,9 +214,7 @@ class BookRepository(
 
     suspend fun deleteBook(id: String) = withContext(Dispatchers.IO) {
         bookDao.getById(id)?.let { book ->
-            book.localPath?.let { File(it).delete() }
-            book.coverPath?.let { File(it).delete() }
-            File(File(context.filesDir, "cache"), id).deleteRecursively()
+            deleteLocalFiles(book)
             // 三步写库成组提交：中途被杀会留下半套 —— 最糟的是目录已清、墓碑没打上，
             // 书还在书架里但点进去是空目录，而且再删一次也修不好（文件早没了）。
             // 文件删除放在事务外：那是不可回滚的磁盘 IO，圈进来只会拉长锁。
@@ -233,6 +230,19 @@ class BookRepository(
                 bookDao.softDelete(id, now)
             }
         }
+    }
+
+    /**
+     * 清掉一本书在本机的附属文件：导入的书文件、本地封面、正文缓存。删书、丢弃试读、
+     * 同步来的远端删除都走这里。
+     *
+     * 路径一律经 [deleteOwnedFile] 限定在 books/ 与 covers/ 之内：同步来的书行里，路径与 id
+     * 都出自备份文件，不能拿来直接删（见那里的说明）。只做文件 IO，调用方负责在 IO 线程、事务之外调。
+     */
+    fun deleteLocalFiles(book: BookEntity) {
+        deleteOwnedFile(book.localPath, booksDir())
+        deleteOwnedFile(book.coverPath, coversDir())
+        cache.clear(book.id)
     }
 
     suspend fun setGroup(id: String, group: String) {
