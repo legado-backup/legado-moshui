@@ -63,12 +63,23 @@ class BookRepository(
      * 只认本地：同名网络书不挡导入 —— 用户完全可能先从书源加过一本，再导一份本地备份。
      * 墓碑同样排除（见 [shelfBookIdByKey]）。
      */
-    suspend fun shelfLocalBookIdByKey(title: String, author: String?): String? {
+    suspend fun shelfLocalBookIdByKey(title: String, author: String?): String? =
+        shelfLocalBookByKey(title, author)?.id
+
+    /**
+     * 同 [shelfLocalBookIdByKey]，有本机文件的那本优先 —— 同名的既有真书、又有同步来的占位时，
+     * 导入该撞上真书（跳过），而不是去补那条占位。
+     */
+    private suspend fun shelfLocalBookByKey(title: String, author: String?): BookEntity? {
         val key = bookKey(title, author)
-        return bookDao.getAllVisible().firstOrNull {
+        val matches = bookDao.getAllVisible().filter {
             it.type != BookType.NET && bookKey(it.title, it.author) == key
-        }?.id
+        }
+        return matches.firstOrNull { it.hasLocalFile() } ?: matches.firstOrNull()
     }
+
+    /** 本机有这本书的文件。WebDAV 同步来的本地书只有书行（文件不进备份），localPath 为 null */
+    private fun BookEntity.hasLocalFile(): Boolean = localPath?.let { File(it).isFile } == true
 
     private fun booksDir(): File = File(context.filesDir, "books").apply { mkdirs() }
 
@@ -155,10 +166,33 @@ class BookRepository(
             }.ifBlank { "未命名" }
             val author = book.metadata.author ?: ""
 
-            shelfLocalBookIdByKey(title, author)?.let { existingId ->
-                dest.delete()
-                coverFile?.delete()
-                return@use LocalImportResult.AlreadyOnShelf(existingId)
+            shelfLocalBookByKey(title, author)?.let { existing ->
+                if (existing.hasLocalFile()) {
+                    dest.delete()
+                    coverFile?.delete()
+                    return@use LocalImportResult.AlreadyOnShelf(existing.id)
+                }
+                // 书架上那本只是**占位**：别的设备同步来的本地书只有书行，文件不进备份。
+                // 「换设备后本地书需要重新导入」说的就是这一步 —— 从前这里当成「已在书架」跳过、
+                // 还把刚复制来的文件删了，用户怎么导都打不开，只能删掉那条坏书；而删除会同步回去，
+                // 把原设备上的真书文件也一并删掉。补上文件、沿用原 id（进度/分组/隐藏都跟着这条书行走）。
+                val fresh = bookDao.getById(existing.id) ?: existing
+                // 只改本机才有意义的列，不动 updatedAt：书名/分组这些同步元数据没变，
+                // 盖新时间戳只会让这台设备在下次合并里无故「赢」一回。
+                val relinked = fresh.copy(
+                    type = type,
+                    localPath = dest.absolutePath,
+                    coverPath = coverPath,
+                    intro = fresh.intro ?: book.metadata.description?.htmlToPlainText(),
+                    totalChapters = book.chapters.size,
+                )
+                val chapters = book.chapters.map { ChapterEntity(fresh.id, it.index, it.title) }
+                db.withWriteTransaction {
+                    bookDao.update(relinked)
+                    chapterDao.deleteByBook(fresh.id)
+                    chapterDao.upsertAll(chapters)
+                }
+                return@use LocalImportResult.Added(fresh.id)
             }
 
             val entity = BookEntity(
@@ -264,7 +298,11 @@ class BookRepository(
 
     /** 打开本地书文件（调用方负责 close） */
     fun openLocal(book: BookEntity): BookHandle {
-        val path = book.localPath ?: error("非本地书籍")
+        val path = book.localPath ?: error(
+            if (book.type == BookType.NET) "非本地书籍"
+            // 同步只带书架信息、不带文件：别的设备导入的书在这台设备上只是一条占位
+            else "这本书的文件不在这台设备上，请在书架重新导入同一个文件",
+        )
         return parserRegistry.open(File(path))
     }
 
