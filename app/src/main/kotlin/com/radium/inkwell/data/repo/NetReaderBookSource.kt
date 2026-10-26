@@ -7,6 +7,7 @@ import com.radium.inkwell.data.db.dao.ChapterDao
 import com.radium.inkwell.data.db.entity.ChapterEntity
 import com.radium.inkwell.core.source.guardPrivateNetwork
 import com.radium.inkwell.reader.api.ReaderBookSource
+import com.radium.inkwell.util.SingleFlight
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -32,25 +33,36 @@ class NetReaderBookSource(
 
     override fun chapterTitle(index: Int): String? = chapters.getOrNull(index)?.title
 
+    /**
+     * 同一章同时只抓一次（按章节 URL 合并）。
+     *
+     * 阅读页每出一页就可能排一轮邻章（showPage、showPosition、半排版回调各一次），每轮都对 center±1
+     * 调 loadChapter —— 不合并的话同一章被并发抓两到四遍：白耗流量不说，JS 源要在 WebView 渲染锁上
+     * 排队、限速源要排令牌，用户正等着的那一章被这些重复请求挤到超时，随后误触发自动换源、清缓存。
+     */
+    private val loads = SingleFlight<String, ChapterContent>(Dispatchers.IO)
+
     override suspend fun loadChapter(index: Int): ChapterContent {
         val chapter = chapters.getOrNull(index) ?: error("章节不存在: $index")
         val url = chapter.url ?: error("章节缺少地址")
         // 缓存以章节 URL 为 key：目录变动后序号会错位，按序号读会读出别的章节。
         // 读盘（含 MD5 计算）切到 IO：阅读器在主线程调用，翻章时别拿它掉帧。
         withContext(Dispatchers.IO) { cache.read(bookId, url) }?.let { return it }
-        // 目录阶段 @put 存的变量随章节一起落了库，这里喂回给正文规则的 @get
-        val remote = engine.getContent(
-            rule, url, chapterUrls,
-            chapterVariable = chapter.variable,
-            chapterTitle = chapter.title.orEmpty(),
-            chapterIndex = index,
-        )
-        val content = ChapterContent(remote.elements)
-        withContext(Dispatchers.IO) {
-            cache.write(bookId, url, content)
-            chapterDao.markCached(bookId, index, true)
+        return loads.run(url) {
+            // 目录阶段 @put 存的变量随章节一起落了库，这里喂回给正文规则的 @get
+            val remote = engine.getContent(
+                rule, url, chapterUrls,
+                chapterVariable = chapter.variable,
+                chapterTitle = chapter.title.orEmpty(),
+                chapterIndex = index,
+            )
+            val content = ChapterContent(remote.elements)
+            withContext(Dispatchers.IO) {
+                cache.write(bookId, url, content)
+                chapterDao.markCached(bookId, index, true)
+            }
+            content
         }
-        return content
     }
 
     override suspend fun prefetchChapter(index: Int) {
