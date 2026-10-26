@@ -129,6 +129,18 @@ class BookSourceEngineTest {
         assertTrue(page.hasMore)
     }
 
+    /** Legado 编辑器保存时总会写一个空的 ruleExplore；列表规则为空就该回落到搜索规则 */
+    @Test
+    fun `ruleExplore 为空对象时复用搜索规则`() = runBlocking {
+        val json = sourceJson(base).replace(
+            """"ruleExplore": { "bookList": "div.result", "name": "h3 a@text", "bookUrl": "h3 a@href" }""",
+            """"ruleExplore": {}""",
+        )
+        assertTrue(json.contains(""""ruleExplore": {}"""))
+        val page = engine().explore(BookSourceRule.fromJson(json), 0, 1)
+        assertEquals(listOf("发现书一", "发现书二"), page.items.map { it.title })
+    }
+
     @Test
     fun `explore index out of bounds throws`() = runBlocking {
         assertFailsWith<SourceException> { engine().explore(source(), 5, 1) }

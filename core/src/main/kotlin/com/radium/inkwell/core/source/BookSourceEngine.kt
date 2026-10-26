@@ -160,8 +160,12 @@ class BookSourceEngine(
         engineIo {
             val item = source.explore.getOrNull(exploreIndex)
                 ?: throw SourceException("书源「${source.name}」发现页下标越界: $exploreIndex")
-            // Legado：发现页列表/字段规则缺省时复用搜索规则
-            val rule = source.ruleExplore ?: source.ruleSearch
+            // Legado：发现页列表规则缺省时复用搜索规则。「缺省」看的是 bookList 空不空，不是
+            // ruleExplore 这个对象在不在 —— Legado 编辑器每次保存都写一个 `"ruleExplore":{}`，
+            // 只按对象判的话，这类书源的发现页永远是空列表。
+            val rule = source.ruleExplore?.takeUnless { it.bookList.isNullOrBlank() }
+                ?: source.ruleSearch
+                ?: source.ruleExplore
                 ?: throw SourceException("书源「${source.name}」未配置发现规则")
             val vars = varsOf(source, "key" to "", "keyword" to "", "page" to page.toString())
             val fetched = fetchByRequest(source, item.url, vars, "explore")
