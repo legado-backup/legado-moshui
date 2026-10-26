@@ -36,8 +36,19 @@ data class BookEntity(
     /** 阅读进度：真身为 (章节索引, 章内字符偏移) */
     val readChapterIndex: Int = 0,
     val readCharOffset: Int = 0,
-    /** 进度更新时间戳，WebDAV 同步冲突裁决用 */
+    /**
+     * 进度**真的挪动过**的时间戳，WebDAV 同步冲突裁决用。
+     *
+     * 只在章或章内偏移变了时才更新（见 BookDao.updateProgress）：打开书、原地退出也盖新时间戳的话，
+     * 一台还没同步的旧设备只要开一下书，就拿旧位置赢过另一台设备的真实进度、扩散到所有设备。
+     */
     val readAt: Long = 0,
+    /**
+     * 最近一次打开的时间，**只在本机**用于书架「最近阅读」排序，不进备份。
+     *
+     * 和 [readAt] 分开存，正是因为上面那条：readAt 不再随「打开」刷新，书架却仍该把刚打开的书排到前面。
+     */
+    val openedAt: Long = 0,
     val addedAt: Long,
     val updatedAt: Long,
     /** 书源脚本在详情阶段存下的变量（JSON）；见 ChapterEntity.variable */

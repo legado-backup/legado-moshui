@@ -322,8 +322,8 @@ class ReaderViewModel(
             (source as? AutoCloseable)?.close()
             var b = bookRepo.getBook(bookId) ?: error("书籍不存在")
             book = b
-            // 打开即已知晓：书架上那个"有 N 章新的"红点该灭了
-            if (b.newChapterCount > 0) bookRepo.clearNewChapters(bookId)
+            // 打开即已知晓：书架上那个"有 N 章新的"红点该灭了；打开时间也记下来，书架按它排「最近阅读」
+            bookRepo.markOpened(bookId)
             position = ReadPosition(b.readChapterIndex, b.readCharOffset)
             // splash 的书名/封面第一时间交出去：下面 WebDAV 无目录的冷路径要先抓一次目录
             // （网络往返），而那正是 splash 必然出场的场景 —— 拖到目录回来才随全量 state 写入，
@@ -352,7 +352,7 @@ class ReaderViewModel(
                         b = bookRepo.getBook(bookId) ?: b
                         book = b
                         position = ReadPosition(b.readChapterIndex, b.readCharOffset)
-                        if (b.newChapterCount > 0) bookRepo.clearNewChapters(bookId)
+                        if (b.newChapterCount > 0) bookRepo.markOpened(bookId)
                     }
                 }
                 NetReaderBookSource(bookId, chapters, rule, engine, contentCache, chapterDao)

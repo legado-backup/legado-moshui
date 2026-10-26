@@ -27,7 +27,7 @@ import com.radium.inkwell.data.db.entity.RssSourceEntity
         ReplaceRuleEntity::class,
         RssSourceEntity::class,
     ],
-    version = 16,
+    version = 17,
     exportSchema = false,
 )
 abstract class InkwellDb : RoomDatabase() {
@@ -169,6 +169,16 @@ abstract class InkwellDb : RoomDatabase() {
         val MIGRATION_15_16 = object : Migration(15, 16) {
             override suspend fun migrate(connection: SQLiteConnection) {
                 connection.execSQL("ALTER TABLE book ADD COLUMN inShelf INTEGER NOT NULL DEFAULT 1")
+            }
+        }
+
+        /**
+         * 本机「最近打开」时间，书架排序用。readAt 改为只在进度真的挪动时才更新（同步裁决不被
+         * 「开一下书」污染），排序就得另有一列记「打开过」。只加列、默认 0 —— 老数据按 readAt 排，与原来一致。
+         */
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE book ADD COLUMN openedAt INTEGER NOT NULL DEFAULT 0")
             }
         }
 

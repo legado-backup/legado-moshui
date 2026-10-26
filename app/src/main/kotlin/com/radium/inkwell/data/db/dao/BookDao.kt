@@ -11,7 +11,8 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface BookDao {
-    @Query("SELECT * FROM book WHERE deleted = 0 AND inShelf = 1 ORDER BY readAt DESC, addedAt DESC")
+    /** 「最近阅读」= 进度挪动过或打开过，取较晚者（见 [BookEntity.openedAt]） */
+    @Query("SELECT * FROM book WHERE deleted = 0 AND inShelf = 1 ORDER BY MAX(readAt, openedAt) DESC, addedAt DESC")
     fun observeAll(): Flow<List<BookEntity>>
 
     @Query("SELECT * FROM book WHERE id = :id")
@@ -37,7 +38,21 @@ interface BookDao {
     @Query("DELETE FROM book WHERE id = :id")
     suspend fun hardDelete(id: String)
 
-    @Query("UPDATE book SET readChapterIndex = :chapterIndex, readCharOffset = :charOffset, readAt = :readAt WHERE id = :id")
+    /**
+     * 写进度；**位置没变就不动 readAt**。同步按 readAt 裁决进度，打开书时首屏、退出时 flush 都会来写一次 ——
+     * 一律盖新时间戳的话，还没同步的旧设备开一下书就拿旧位置赢过别的设备。
+     * SQLite 的 SET 里各表达式读的都是更新前的行，CASE 比较的是旧位置。
+     */
+    @Query(
+        """
+        UPDATE book SET
+            readAt = CASE WHEN readChapterIndex != :chapterIndex OR readCharOffset != :charOffset
+                THEN :readAt ELSE readAt END,
+            readChapterIndex = :chapterIndex,
+            readCharOffset = :charOffset
+        WHERE id = :id
+        """,
+    )
     suspend fun updateProgress(id: String, chapterIndex: Int, charOffset: Int, readAt: Long)
 
     /** 含墓碑，**只给 WebDAV 备份用** —— 合并要靠 deleted 行表达「这本书被删过」。
@@ -60,7 +75,7 @@ interface BookDao {
     @Query("UPDATE book SET hidden = :hidden, updatedAt = :now WHERE id = :id")
     suspend fun setHidden(id: String, hidden: Boolean, now: Long)
 
-    /** 打开这本书 = 你已经知道它更新了，红点清零 */
-    @Query("UPDATE book SET newChapterCount = 0 WHERE id = :id")
-    suspend fun clearNewChapters(id: String)
+    /** 打开这本书 = 你已经知道它更新了，红点清零；顺带记下打开时间给书架排序 */
+    @Query("UPDATE book SET newChapterCount = 0, openedAt = :now WHERE id = :id")
+    suspend fun markOpened(id: String, now: Long)
 }

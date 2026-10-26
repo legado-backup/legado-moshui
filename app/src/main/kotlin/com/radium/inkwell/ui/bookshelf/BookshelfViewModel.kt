@@ -66,7 +66,8 @@ class BookshelfViewModel(
      * 限流 4 而不是全部并发：几十本书同时打同一个站点，会被限流甚至封 IP，
      * 结果是一本都刷不出来。
      *
-     * 按 [BookEntity.readAt] 降序：最近读过的先刷，有更新时更快看见红点。
+     * 按「最近阅读」降序（与书架同一口径：[BookEntity.readAt] / [BookEntity.openedAt] 取较晚者）：
+     * 最近读过的先刷，有更新时更快看见红点。
      * PullToRefresh 转圈只挂一小会儿 —— 整轮 await 绑死指示器时，架上书一多就像卡死。
      * 后台继续跑，顶栏用 [refreshProgress] 显示「更新中 x/y」。
      */
@@ -82,7 +83,7 @@ class BookshelfViewModel(
             try {
                 val books = allBooks.value
                     .filter { it.type == BookType.NET && !it.sourceId.isNullOrBlank() }
-                    .sortedByDescending { it.readAt }
+                    .sortedByDescending { maxOf(it.readAt, it.openedAt) }
                 if (books.isEmpty()) {
                     messages.emit("书架上没有网络书")
                     return@launch
