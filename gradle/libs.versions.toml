@@ -47,7 +47,7 @@ jsoup = "1.23.2"
 # `selectFirst(...)?.let { }` 这种推断就会炸。compileOnly：只给编译器看，不进包。
 jspecify = "1.0.1"
 rhino = "1.9.1"
-juniversalchardet = "2.5.1"
+juniversalchardet = "2.5.2"
 jsonPath = "3.0.0"
 xpath = "2.5.5"
 biometric = "1.4.0-alpha07"
