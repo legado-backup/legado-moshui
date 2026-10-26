@@ -47,6 +47,13 @@ data class ExploreUiState(
      * 被掐断的网络看起来像是分类本来就空。加载更多失败不进这里：已有的书还在，弹提示即可
      */
     val error: String? = null,
+    /**
+     * 「加载更多」失败了，停在这里等用户点列表底部的重试。
+     *
+     * 不能只靠 hasMore：失败后它还是 true，loadingMore 一落回 false，页面那条「滑到底就加载」的
+     * LaunchedEffect 立刻重跑，人还停在底部 —— 于是无限重试、每轮弹一条「加载失败」，离线时几乎是死循环。
+     */
+    val loadMoreFailed: Boolean = false,
     /** 正在加入书架的那几本（bookUrl）。可以同时加好几本 */
     val addingUrls: Set<String> = emptySet(),
     /** 书架已有书的 (书名,作者) 键；列表据此把已在架的书显示为"已加入" */
@@ -128,11 +135,18 @@ class ExploreViewModel(
 
     fun loadMore() {
         val s = _state.value
-        if (!s.hasMore || s.loading || s.loadingMore) return
+        if (!s.hasMore || s.loading || s.loadingMore || s.loadMoreFailed) return
         loadPage(reset = false)
     }
 
     fun retry() = loadPage(reset = true)
+
+    /** 列表底部「加载失败，点此重试」 */
+    fun retryMore() {
+        val s = _state.value
+        if (!s.hasMore || s.loading || s.loadingMore) return
+        loadPage(reset = false)
+    }
 
     private fun loadPage(reset: Boolean) {
         val s = _state.value
@@ -147,6 +161,7 @@ class ExploreViewModel(
                 loadingMore = !reset,
                 books = if (reset) emptyList() else _state.value.books,
                 error = if (reset) null else _state.value.error,
+                loadMoreFailed = false,
             )
             runCatching { engine.explore(rule, s.categoryIndex, page) }
                 .onSuccess { result ->
@@ -177,6 +192,7 @@ class ExploreViewModel(
                         loading = false,
                         loadingMore = false,
                         error = if (reset) reason else _state.value.error,
+                        loadMoreFailed = !reset,
                     )
                     if (!reset) messages.emit("加载失败: $reason")
                 }

@@ -189,6 +189,19 @@ fun ExploreScreen(
                             ) { AppLoadingIndicator(size = Dimens.iconMd) }
                         }
                     }
+                    // 加载更多失败后不再「滑到底自动重来」（会无限重试），出口放在这里
+                    if (state.loadMoreFailed) {
+                        item {
+                            Box(
+                                Modifier.fillMaxWidth().padding(Dimens.gapS),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                AppTextButton(onClick = { viewModel.retryMore() }) {
+                                    Text("加载失败，点此重试")
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
