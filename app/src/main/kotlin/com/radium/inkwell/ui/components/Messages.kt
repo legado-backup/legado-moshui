@@ -22,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -44,12 +45,17 @@ class MessageBus {
     }
 }
 
-/** 订阅提示事件并弹 Snackbar；新消息到达时替换正在显示的那条 */
+/**
+ * 订阅提示事件并弹 Snackbar；新消息到达时替换正在显示的那条。
+ *
+ * 必须是 collectLatest：showSnackbar 要挂到这条提示消失才返回，普通 collect 在这期间根本不取下一条 ——
+ * 新消息只会排队，一条条等满 4 秒（连点 7 次版本号，「已开启开发者模式」要十几秒后才轮到）。
+ * collectLatest 来新消息就取消上一次 showSnackbar，取消即把它从屏上撤下。
+ */
 @Composable
 fun CollectMessages(bus: MessageBus, snackbar: SnackbarHostState) {
     LaunchedEffect(bus, snackbar) {
-        bus.messages.collect { msg ->
-            snackbar.currentSnackbarData?.dismiss()
+        bus.messages.collectLatest { msg ->
             snackbar.showSnackbar(msg)
         }
     }
