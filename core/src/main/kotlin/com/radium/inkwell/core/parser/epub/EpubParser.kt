@@ -101,10 +101,18 @@ private class EpubBookHandle(
                 Jsoup.parse(String(it, Charsets.UTF_8), "", Parser.xmlParser())
             }
 
-            // DRM 检测
+            // DRM 检测。encryption.xml 里登记的不全是 DRM：IDPF / Adobe 的**字体混淆**也写在这里 ——
+            // 那只是把嵌入字体按书的标识符异或一遍、防字体被原样抠走，正文仍是明文。出版社的书、
+            // Sigil「混淆字体」导出的书都带它，从前一律当成 DRM 拒之门外。我们本来就不用书里的字体，
+            // 这类条目直接忽略；剩下的（含没写算法的）才当真加密。
             read("META-INF/encryption.xml")?.let { enc ->
                 val doc = Jsoup.parse(String(enc, Charsets.UTF_8), "", Parser.xmlParser())
-                if (doc.select("EncryptedData, enc|EncryptedData").isNotEmpty()) {
+                val encrypted = doc.select("EncryptedData, enc|EncryptedData").filterNot { data ->
+                    val algorithm = data.selectFirst("EncryptionMethod, enc|EncryptionMethod")
+                        ?.attr("Algorithm")?.trim()
+                    algorithm in FONT_OBFUSCATION
+                }
+                if (encrypted.isNotEmpty()) {
                     throw BookParseException.DrmProtected("该 EPUB 受 DRM 保护，无法打开")
                 }
             }
@@ -165,9 +173,13 @@ private class EpubBookHandle(
                 }
             }
 
-            // 章节标题：TOC 覆盖到的用 TOC 标题，未覆盖的沿用最近一条
+            // 章节标题：TOC 覆盖到的用 TOC 标题，未覆盖的沿用最近一条。
+            // 先认不带锚点的条目（整份文件就是这一章）；一份文件只被带锚点的条目指到时
+            // （calibre / Sigil 常见的 `part0003.html#ch3`），取其中第一条 —— 只认前者的话，
+            // 这类书每一章都落到「沿用最近一条」，从书名一路沿用下去，目录满屏都是书名。
             val titles = arrayOfNulls<String>(spinePaths.size)
             toc.forEach { e -> if (titles[e.chapterIndex] == null && e.anchor == null) titles[e.chapterIndex] = e.title }
+            toc.forEach { e -> if (titles[e.chapterIndex] == null) titles[e.chapterIndex] = e.title }
             var lastTitle = title
             val chapters = spinePaths.mapIndexed { i, _ ->
                 val t = titles[i] ?: lastTitle
@@ -184,6 +196,12 @@ private class EpubBookHandle(
                 entryIndex = entryIndex,
             )
         }
+
+        /** 字体混淆算法（IDPF 2008、Adobe）：只作用于嵌入字体，不是内容加密 */
+        private val FONT_OBFUSCATION = setOf(
+            "http://www.idpf.org/2008/embedding",
+            "http://ns.adobe.com/pdf/enc#RC",
+        )
 
         private fun parseNav(
             bytes: ByteArray?,

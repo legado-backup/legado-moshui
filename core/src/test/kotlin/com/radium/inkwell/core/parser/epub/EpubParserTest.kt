@@ -70,6 +70,41 @@ class EpubParserTest {
     }
 
     @Test
+    fun `真加密算法照样拒绝`() {
+        val f = temp()
+        EpubFixture.minimalEpub(
+            f, withEncryption = true,
+            encryptionAlgorithm = "http://www.w3.org/2001/04/xmlenc#aes128-cbc",
+        )
+        assertFailsWith<BookParseException.DrmProtected> { EpubParser().open(f) }
+    }
+
+    /** 字体混淆只动嵌入字体、正文是明文 —— 出版社书、Sigil 导出常带，不能当 DRM 拒掉 */
+    @Test
+    fun `只做了字体混淆的书能打开`() {
+        for (algorithm in listOf("http://www.idpf.org/2008/embedding", "http://ns.adobe.com/pdf/enc#RC")) {
+            val f = temp()
+            EpubFixture.minimalEpub(f, withEncryption = true, encryptionAlgorithm = algorithm)
+            EpubParser().open(f).use { book ->
+                assertEquals(3, book.chapters.size)
+            }
+        }
+    }
+
+    /** 目录项全带锚点时，章节标题仍取目录标题，而不是从书名一路沿用下去 */
+    @Test
+    fun `目录项带锚点时章节标题仍取目录`() {
+        val f = temp()
+        EpubFixture.minimalEpub(f, ncxAnchors = true)
+        EpubParser().open(f).use { book ->
+            assertEquals(
+                listOf("第1章 起承转合", "第2章 起承转合", "第3章 起承转合"),
+                book.chapters.map { it.title },
+            )
+        }
+    }
+
+    @Test
     fun `sniff rejects non zip`() {
         val f = temp()
         f.writeBytes(byteArrayOf(1, 2, 3, 4, 5))

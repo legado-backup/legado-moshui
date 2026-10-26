@@ -16,6 +16,10 @@ object EpubFixture {
         withNav: Boolean = false,
         hrefCaseMismatch: Boolean = false,
         withEncryption: Boolean = false,
+        /** encryption.xml 里写的算法；null = 不写 EncryptionMethod（老样本） */
+        encryptionAlgorithm: String? = null,
+        /** NCX 的 content src 带 `#锚点`（calibre / Sigil 常见写法） */
+        ncxAnchors: Boolean = false,
     ) {
         ZipOutputStream(file.outputStream()).use { zip ->
             fun put(name: String, content: String) {
@@ -36,7 +40,9 @@ object EpubFixture {
                 put(
                     "META-INF/encryption.xml",
                     """<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-                       <EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#"><CipherData/></EncryptedData>
+                       <EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">${
+                           encryptionAlgorithm?.let { """<EncryptionMethod Algorithm="$it"/>""" }.orEmpty()
+                       }<CipherData><CipherReference URI="OEBPS/fonts/a.ttf"/></CipherData></EncryptedData>
                        </encryption>""",
                 )
             }
@@ -84,7 +90,7 @@ object EpubFixture {
 
             val navPoints = (1..chapterCount).joinToString("") { i ->
                 """<navPoint id="np$i" playOrder="$i"><navLabel><text>第${i}章 起承转合</text></navLabel>
-                   <content src="text/ch$i.xhtml"/></navPoint>"""
+                   <content src="text/ch$i.xhtml${if (ncxAnchors) "#c$i" else ""}"/></navPoint>"""
             }
             put(
                 "OEBPS/toc.ncx",
