@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoStories
@@ -66,6 +67,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -87,6 +89,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.TransformOrigin
@@ -170,18 +173,45 @@ fun BookshelfScreen(
     val biometricAvailable = remember { BiometricAuth.isAvailable(context) }
     val haptic = LocalHapticFeedback.current
 
+    // 滚动状态提到这里，展开隐藏区时要能把它拨回顶部（见下面的 LaunchedEffect）
+    val gridState = rememberLazyGridState()
+    val listState = rememberLazyListState()
+
+    /**
+     * 展开隐藏区后，等「并进了隐藏书」的那份列表到了再回到顶部。
+     *
+     * 隐藏的书按「最近阅读」插回原位，常常就插在第一本前面。Lazy 列表按 key 锚定首个可见项：
+     * 它让原来那本书原地不动，新冒出来的几本全落在视口上方 —— 看起来像什么都没发生，
+     * 得手动往上滑才看得见。不能在展开那一刻就回顶：那时列表还是旧的，等新书插进来又被锚定挤到上面去。
+     * 用 requestScrollToItem：它在下一次测量生效，正好与这次数据变化同一帧。
+     */
+    var scrollTopOnReveal by remember { mutableStateOf(false) }
+    LaunchedEffect(scrollTopOnReveal, books) {
+        if (scrollTopOnReveal && books.any { it.hidden }) {
+            if (layout == BookshelfLayout.GRID) gridState.requestScrollToItem(0)
+            else listState.requestScrollToItem(0)
+            scrollTopOnReveal = false
+        }
+    }
+    // 新列表还没到就又收起了：别把这次回顶留到下一回
+    LaunchedEffect(showHidden) { if (!showHidden) scrollTopOnReveal = false }
+
+    fun openHidden() {
+        if (viewModel.openHiddenPanel()) scrollTopOnReveal = true
+    }
+
     /**
      * 展开隐藏书籍。开了验证就先过一遍系统的指纹/面容/设备密码。
      * 收起不需要验证 —— 关灯不用钥匙。
      */
     fun revealHidden() {
         if (!requireAuth || activity == null) {
-            viewModel.openHiddenPanel()
+            openHidden()
             return
         }
         scope.launch {
             when (val r = BiometricAuth.authenticate(activity, "查看隐藏的书")) {
-                BiometricAuth.Result.Success -> viewModel.openHiddenPanel()
+                BiometricAuth.Result.Success -> openHidden()
                 // 用户自己按了取消，别再弹个错误教育他
                 BiometricAuth.Result.Cancelled -> Unit
                 is BiometricAuth.Result.Failed -> viewModel.messages.emit("验证失败: ${r.message}")
@@ -468,6 +498,7 @@ fun BookshelfScreen(
                         layout == BookshelfLayout.GRID -> LazyVerticalGrid(
                             columns = GridCells.Adaptive(minSize = Dimens.bookshelfGridMin),
                             modifier = Modifier.fillMaxSize(),
+                            state = gridState,
                             // 底部多留一个导航栏的高度：网格铺到屏幕最底边、书封滚到导航条下方，
                             // 而最后一排仍能滚清导航条不被挡住
                             contentPadding = PaddingValues(
@@ -510,6 +541,7 @@ fun BookshelfScreen(
                         }
                         else -> LazyColumn(
                             modifier = Modifier.fillMaxSize(),
+                            state = listState,
                             // 左右内缩 + 行距：给 Expressive ListItem 的圆角容器留出背景露出，
                             // 否则贴边铺满时形状变化几乎看不见，主题的 surface 层级也读不出来。
                             contentPadding = ContentListDefaults.listContentPadding(

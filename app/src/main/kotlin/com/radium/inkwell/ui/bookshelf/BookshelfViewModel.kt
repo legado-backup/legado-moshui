@@ -245,9 +245,16 @@ class BookshelfViewModel(
     val hiddenRequireAuth: StateFlow<Boolean> = appPrefs.hiddenRequireAuth
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    /** 验证过了才允许进来 */
-    fun openHiddenPanel() {
+    /**
+     * 验证过了才允许进来。
+     *
+     * 返回这一下有没有书要并回**当前**列表（当前分组下确有被藏的书）—— 界面据此决定要不要回到顶部。
+     * 没有的话列表一本不变，回顶反而把人从原处拽走：第一次想藏书，正是先进隐藏区、再去长按那本书。
+     */
+    fun openHiddenPanel(): Boolean {
         _showHidden.value = true
+        val g = _group.value
+        return allBooks.value.any { it.hidden && inGroup(it, g) }
     }
 
     /** 「展开需验证」只在隐藏区状态条上露面，所以设置这件事归书架管，而不是设置页 */
@@ -268,14 +275,14 @@ class BookshelfViewModel(
         combine(allBooks, _group, _showHidden) { list, g, showHidden ->
             list
                 .filter { showHidden || !it.hidden }
-                .filter { book ->
-                    when (g) {
-                        null -> true
-                        UNGROUPED -> book.groupName.isBlank()
-                        else -> book.groupName.trim() == g
-                    }
-                }
+                .filter { inGroup(it, g) }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private fun inGroup(book: BookEntity, g: String?): Boolean = when (g) {
+        null -> true
+        UNGROUPED -> book.groupName.isBlank()
+        else -> book.groupName.trim() == g
+    }
 
     // ---- 多选 ----
 
