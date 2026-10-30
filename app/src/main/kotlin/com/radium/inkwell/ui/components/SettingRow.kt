@@ -6,7 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.ZeroCornerSize
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -61,25 +61,20 @@ enum class SettingGroupPosition {
     Last,
 }
 
-/** 与 [SettingGroup] / [MaterialTheme.shapes.large] 同档的圆角半径 */
-private val SettingGroupCorner = 16.dp
-
+/**
+ * 组内行的切角：从 [SettingGroup] 用的 [MaterialTheme.shapes.large] 直接派生，只把不该圆的那一侧压成直角。
+ * 从前另存了一份 16dp 半径、手拼 RoundedCornerShape —— 哪天主题改了 large，组卡跟着变、组内行的
+ * 按压遮罩却还是旧圆角，两层角对不上。
+ */
 @Composable
-internal fun settingGroupItemShape(position: SettingGroupPosition): Shape = when (position) {
-    SettingGroupPosition.Alone -> MaterialTheme.shapes.large
-    SettingGroupPosition.First -> RoundedCornerShape(
-        topStart = SettingGroupCorner,
-        topEnd = SettingGroupCorner,
-        bottomStart = 0.dp,
-        bottomEnd = 0.dp,
-    )
-    SettingGroupPosition.Middle -> RectangleShape
-    SettingGroupPosition.Last -> RoundedCornerShape(
-        topStart = 0.dp,
-        topEnd = 0.dp,
-        bottomStart = SettingGroupCorner,
-        bottomEnd = SettingGroupCorner,
-    )
+internal fun settingGroupItemShape(position: SettingGroupPosition): Shape {
+    val group = MaterialTheme.shapes.large
+    return when (position) {
+        SettingGroupPosition.Alone -> group
+        SettingGroupPosition.First -> group.copy(bottomStart = ZeroCornerSize, bottomEnd = ZeroCornerSize)
+        SettingGroupPosition.Middle -> RectangleShape
+        SettingGroupPosition.Last -> group.copy(topStart = ZeroCornerSize, topEnd = ZeroCornerSize)
+    }
 }
 
 /**
@@ -128,7 +123,8 @@ fun settingsStackListColors() =
  * 设置页分组卡：多条 [SettingRow] / [SwitchRow]（带 [SettingGroupPosition]）收进同一张大圆角 Surface。
  *
  * 圆角只画在这一层，组内行按位置切角，避免「框套框」与按压遮罩四角形状不对。
- * 组间距靠上下各半格 [Dimens.gapM]，组与组之间等于一整格。
+ * 组间距靠上下各 [Dimens.gapS]，组与组之间合起来正好一档 [Dimens.gapL]（「分组之间」）。
+ * 从前是上下各 `gapM / 2`（6dp）—— 为了凑一整格 gapM 拿令牌做除法，落到了 4dp 栅格外面。
  *
  * 色：见 [settingsPageColor] / [settingsCardColor] —— 浅色灰底白卡、深色黑底浅卡。
  * 角：用 [MaterialTheme.shapes.large]（16dp），对齐系统设置分组卡。
@@ -154,7 +150,7 @@ fun SettingGroup(
                     Modifier
                 },
             )
-            .padding(vertical = Dimens.gapM / 2),
+            .padding(vertical = Dimens.gapS),
         shape = MaterialTheme.shapes.large,
         color = settingsCardColor(),
         content = { Column(content = content) },

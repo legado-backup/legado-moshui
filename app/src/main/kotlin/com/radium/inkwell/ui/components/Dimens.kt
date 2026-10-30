@@ -79,6 +79,17 @@ object Dimens {
     /** 48dp。空状态正中那个 */
     val iconXL = 48.dp
 
+    // ---- 描边 ----
+    /**
+     * 1dp。未选中色板的外圈、预览框这类细描边。
+     *
+     * 描边粗细不是间距，不走 4dp 栅格：4dp 的「细线」在 52dp 色板上就是一道粗环。
+     * 从前各处写 `1.dp`、`Dimens.gapXS / 4`（为了躲栅格硬凑出来的 1dp），同一种线两种写法。
+     */
+    val strokeThin = 1.dp
+    /** 2dp。选中色板的外圈、小号转圈的线宽 —— 比 [strokeThin] 粗一档才看得出「选中」 */
+    val strokeThick = 2.dp
+
     // ---- 控件 ----
     /** 触控目标下限（Material：48dp）。图标本身可以小，可点区域不能小于它 */
     val touchTarget = 48.dp

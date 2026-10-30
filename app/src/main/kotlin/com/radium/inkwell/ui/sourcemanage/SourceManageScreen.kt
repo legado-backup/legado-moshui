@@ -4,16 +4,18 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
@@ -62,6 +64,9 @@ import com.radium.inkwell.ui.components.AppSlider
 import com.radium.inkwell.ui.components.CompactTextField
 import com.radium.inkwell.ui.components.BackButton
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import com.radium.inkwell.ui.components.ContentListDefaults
@@ -81,6 +86,7 @@ fun SourceManageScreen(
     viewModel: SourceManageViewModel,
 ) {
     val sources by viewModel.sources.collectAsStateWithLifecycle()
+    val sourcesLoaded by viewModel.sourcesLoaded.collectAsStateWithLifecycle()
     val visible by viewModel.visibleSources.collectAsStateWithLifecycle()
     val exploreOnlyIds by viewModel.exploreOnlyIds.collectAsStateWithLifecycle()
     val selected by viewModel.selected.collectAsStateWithLifecycle()
@@ -264,7 +270,9 @@ fun SourceManageScreen(
         },
         snackbarHost = { AppSnackbarHost(snackbar) },
     ) { padding ->
-        if (sources.isEmpty()) {
+        if (!sourcesLoaded) {
+            // 库还没读回来：先空着，别闪一下「还没有书源」
+        } else if (sources.isEmpty()) {
             EmptyState(
                 icon = Icons.Default.Source,
                 title = "还没有书源",
@@ -349,7 +357,8 @@ fun SourceManageScreen(
                 }
             }
             LazyColumn(
-                Modifier.fillMaxSize(),
+                // 上面压着搜索框：edge-to-edge 下键盘弹起会盖住列表下半截，最后几条滚不出来
+                Modifier.fillMaxSize().imePadding(),
                 contentPadding = ContentListDefaults.listContentPadding(),
                 verticalArrangement = Arrangement.spacedBy(ContentListDefaults.ListSpacing),
             ) {
@@ -557,16 +566,19 @@ private fun SourceListRow(
     val trailing: (@Composable () -> Unit)? = if (!selectionMode) {
         {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // 图标走 onSurfaceVariant：outline 只给边框/分隔线，拿它画可点的图标在浅色下对比度不够
                 AppIconButton(onClick = onDelete) {
                     Icon(
                         Icons.Default.Delete,
                         contentDescription = "删除",
-                        tint = MaterialTheme.colorScheme.outline,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Switch(
                     checked = source.enabled,
                     onCheckedChange = onToggleEnabled,
+                    // 行尾开关自己是一个焦点，得有名字：只念「开关，已开启」听不出开的是哪个源
+                    modifier = Modifier.semantics { contentDescription = "启用「${source.name}」" },
                 )
             }
         }
@@ -628,7 +640,8 @@ private fun SourceListRow(
                             MaterialTheme.colorScheme.secondaryContainer,
                             MaterialTheme.shapes.extraSmall,
                         )
-                        .padding(horizontal = Dimens.gapS, vertical = Dimens.gapXS / 4),
+                        // 只留左右：上下贴着 labelSmall 的行高，正好是 M3 大号 Badge 的 16dp
+                        .padding(horizontal = Dimens.gapS),
                 )
             }
         }
@@ -658,13 +671,21 @@ private fun SourceListRow(
     }
 }
 
+/**
+ * 校验选项里的开关行。整行就是一个开关：toggleable(role = Switch)，行内 Switch 只做展示 ——
+ * 从前是 `clickable {}` 套一个能单独拨的 Switch，读屏上一行出两个焦点，行那个还念不出开关状态。
+ */
 @Composable
 private fun CheckItemRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable { onChange(!checked) },
+        Modifier
+            .fillMaxWidth()
+            // Switch 只展示时不再自带 48dp 触控区，行自己撑够
+            .heightIn(min = Dimens.touchTarget)
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onChange),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        Switch(checked = checked, onCheckedChange = onChange)
+        Switch(checked = checked, onCheckedChange = null)
     }
 }

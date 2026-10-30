@@ -7,10 +7,12 @@ import com.radium.inkwell.core.source.BookSourceEngine
 import com.radium.inkwell.core.source.BookSourceRule
 import com.radium.inkwell.core.source.SearchPage
 import com.radium.inkwell.core.source.SearchResult
+import com.radium.inkwell.data.prefs.AppPrefs
 import com.radium.inkwell.data.repo.AutoSourceSwitcher
 import com.radium.inkwell.data.repo.BookRepository
 import com.radium.inkwell.data.repo.BookSourceRepository
 import com.radium.inkwell.data.repo.NetBookRepository
+import com.radium.inkwell.ui.bookshelf.searchableShelfKeys
 import com.radium.inkwell.ui.components.MessageBus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -30,10 +32,22 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 import java.text.Collator
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * 「同一本书」的键：同名同作者。跨书源合并按它，搜索列表的 item key 也按它 —— 两处**必须**是同一个。
+ *
+ * 从前列表拿代表条目的 `sourceId|bookUrl` 当 key，合并却按书名+作者：一个书源把同一地址列成两条
+ * （书名或作者写法不同，比如站点把「书名（完本）」和「书名」各列一条），就是两本书、同一个 key ——
+ * LazyColumn 当场「Key was already used」崩溃。发现页踩过同一个坑（见 exploreKey）。
+ */
+internal val SearchResult.searchKey: Pair<String, String>
+    get() = title.trim() to author?.trim().orEmpty()
 
 /**
  * 一本书；同名同作者的结果跨书源合并成一条。
@@ -41,6 +55,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * 代表书源挂了还有别的可用，否则用户就卡死在报错页。
  */
 data class SearchHit(val results: List<SearchResult>) {
+    /** 合并键，也是列表 key；同一个 hit 里的结果键都相同（见 [searchKey]） */
+    val key: Pair<String, String> get() = results.first().searchKey
     /** 代表条目：优先带字数/分类的那条，列表副标题才有东西可看 */
     val result: SearchResult
         get() = results.firstOrNull { !it.wordCount.isNullOrBlank() || !it.kind.isNullOrBlank() }
@@ -84,7 +100,7 @@ data class SearchUiState(
      * 自动恢复会跟详情页抢网，刚打开的书又开始转圈。
      */
     val searchPaused: Boolean = false,
-    /** 书架已有书的 (书名,作者) 键；列表据此把已在架的书显示为"已加入" */
+    /** 书架已有书的 (书名,作者) 键；列表据此把已在架的书显示为"已加入"（隐藏区上锁时不含隐藏的书） */
     val shelfKeys: Set<Pair<String, String>> = emptySet(),
 )
 
@@ -93,7 +109,10 @@ class SearchViewModel(
     private val netBookRepo: NetBookRepository,
     private val engine: BookSourceEngine,
     private val bookRepo: BookRepository,
-) : ViewModel() {
+) : ViewModel(), KoinComponent {
+
+    /** 只为读「隐藏区上没上锁」这一个开关，同 BookPreviewViewModel 从 Koin 现取 */
+    private val appPrefs: AppPrefs by inject()
 
     private val _state = MutableStateFlow(SearchUiState())
     val state: StateFlow<SearchUiState> = _state.asStateFlow()
@@ -177,9 +196,12 @@ class SearchViewModel(
     }
 
     init {
-        // 书架变动时刷新"已加入"标记（本页加书、别处加/删、跨书源加了同名书都算）
+        // 书架变动时刷新"已加入"标记（本页加书、别处加/删、跨书源加了同名书都算）。
+        // 隐藏区上了锁时隐藏的书不算在架 —— 否则一次搜索就绕开了那把锁，见 searchableShelfKeys
         viewModelScope.launch {
-            bookRepo.shelfKeys.collect { keys -> _state.value = _state.value.copy(shelfKeys = keys) }
+            searchableShelfKeys(bookRepo, appPrefs).collect { keys ->
+                _state.value = _state.value.copy(shelfKeys = keys)
+            }
         }
     }
 
@@ -195,6 +217,7 @@ class SearchViewModel(
         val sortId = _state.value.sortId + 1
         // 先拍快照再丢到 Default：Collator 拼音排几百上千条会卡住主线程，
         // 底部面板关动画也会跟着一顿。标签先切过去，列表排完再换。
+        // 这份快照可能比随后的发布旧：发布/收尾/暂停写结果前都会先掐掉它（见 [cancelStaleSort]）。
         _state.value = _state.value.copy(sort = sort, sortId = sortId)
         sortJob = viewModelScope.launch {
             val snapshot = hitsMutex.withLock { hits.values.toList() }
@@ -282,6 +305,7 @@ class SearchViewModel(
         val searchId = s.searchId
         val keyword = activeKeyword
         viewModelScope.launch {
+            cancelStaleSort()
             val snapshot = hitsMutex.withLock { hits.values.toList() }
             val sorted = orderedNow(snapshot, keyword)
             if (_state.value.searchId != searchId) return@launch
@@ -369,6 +393,7 @@ class SearchViewModel(
         fetchPage: Int,
     ) {
         publishJob?.cancel()
+        cancelStaleSort()
         val snapshot = hitsMutex.withLock { hits.values.toList() }
         val sorted = orderedNow(snapshot, keyword)
         val more = moreAcc.toList()
@@ -394,11 +419,25 @@ class SearchViewModel(
         publishJob = viewModelScope.launch {
             delay(PUBLISH_DEBOUNCE_MS)
             if (_state.value.searchId != searchId) return@launch
+            cancelStaleSort()
             val snapshot = hitsMutex.withLock { hits.values.toList() }
             val sorted = orderedNow(snapshot, keyword)
             if (_state.value.searchId != searchId) return@launch
             _state.update { it.copy(results = sorted) }
         }
+    }
+
+    /**
+     * 掐掉还在排的那次换排序。发布、收尾、暂停都按**此刻**的排序重排一份更新的快照（[orderedNow]），
+     * 写结果之前先调它。
+     *
+     * 换排序那一刻拍的快照可能比它们的旧：搜索途中切「字数」，Default 上还在排几百条，这一轮恰好收尾、
+     * 把完整列表刷了上去 —— 排序那边后到，sortId 又没变，于是拿半截快照把最终结果盖掉，
+     * 「共 N 本」停在一个偏小的数，直到再动一下排序才对。被掐掉不丢东西：要写的那份本来就是新排序排的。
+     */
+    private fun cancelStaleSort() {
+        sortJob?.cancel()
+        sortJob = null
     }
 
     /**
@@ -422,17 +461,7 @@ class SearchViewModel(
     /** 同名同作者视为同一本书；键的顺序即首次出现的顺序，用于同档同源数时保持稳定 */
     private val hits = LinkedHashMap<Pair<String, String>, SearchHit>()
 
-    private fun merge(items: List<SearchResult>) {
-        for (r in items) {
-            val key = r.title.trim() to r.author?.trim().orEmpty()
-            val old = hits[key]
-            hits[key] = when {
-                old == null -> SearchHit(listOf(r))
-                old.results.any { it.sourceId == r.sourceId } -> old
-                else -> SearchHit(old.results + r)
-            }
-        }
-    }
+    private fun merge(items: List<SearchResult>) = mergeSearchResults(hits, items)
 
     /**
      * 对快照排序。Collator 非线程安全，每次现场建一份；
@@ -591,6 +620,25 @@ class SearchViewModel(
         /** 详情+目录两个请求；三个源串起来不超过一分钟 */
         private const val ADD_TIMEOUT_MS = 20_000L
         private const val MAX_ADD_TRIES = 3
+    }
+}
+
+/**
+ * 把一页结果并进 [hits]：按 [searchKey] 跨书源合并成一本，同一书源只留首条。
+ * 抽成顶层函数是为了能直接测 —— 合并键与列表 key 一旦对不上就是崩溃。
+ */
+internal fun mergeSearchResults(
+    hits: MutableMap<Pair<String, String>, SearchHit>,
+    items: List<SearchResult>,
+) {
+    for (r in items) {
+        val key = r.searchKey
+        val old = hits[key]
+        hits[key] = when {
+            old == null -> SearchHit(listOf(r))
+            old.results.any { it.sourceId == r.sourceId } -> old
+            else -> SearchHit(old.results + r)
+        }
     }
 }
 

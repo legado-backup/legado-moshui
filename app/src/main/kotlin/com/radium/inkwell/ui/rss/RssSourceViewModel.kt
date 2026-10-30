@@ -9,6 +9,7 @@ import com.radium.inkwell.data.db.entity.RssSourceEntity
 import com.radium.inkwell.data.repo.RssImportReport
 import com.radium.inkwell.data.repo.RssRepository
 import com.radium.inkwell.ui.components.MessageBus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -23,8 +24,12 @@ class RssSourceViewModel(
     private val repo: RssRepository,
 ) : ViewModel() {
 
-    val sources: StateFlow<List<RssSourceEntity>> = repo.sources
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /**
+     * 订阅源列表；null = 库的第一帧还没到。
+     * 不用 emptyList 当初值：那和「真没有订阅源」分不开，每次进页都先闪一下空态和「添加订阅源」。
+     */
+    val sources: StateFlow<List<RssSourceEntity>?> = repo.sources
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val messages = MessageBus()
 
@@ -54,27 +59,34 @@ class RssSourceViewModel(
         if (_importing.value) return
         viewModelScope.launch {
             _importing.value = true
-            runCatching { block() }
-                .onSuccess { report ->
-                    messages.emit(
-                        buildString {
-                            if (report.total > 0) {
-                                append("导入订阅源：新增 ${report.added}")
-                                if (report.updated > 0) append("，更新 ${report.updated}")
-                            } else {
-                                append("没有导入任何订阅源")
+            try {
+                runCatching { block() }
+                    .onSuccess { report ->
+                        messages.emit(
+                            buildString {
+                                if (report.total > 0) {
+                                    append("导入订阅源：新增 ${report.added}")
+                                    if (report.updated > 0) append("，更新 ${report.updated}")
+                                } else {
+                                    append("没有导入任何订阅源")
+                                }
+                                // 跳过的必须说清为什么，否则用户只会看到"少了几个"却不知道少在哪
+                                if (report.skipped.isNotEmpty()) {
+                                    append("；跳过 ${report.skipped.size}（")
+                                    append(report.skipped.take(2).joinToString("；"))
+                                    append("）")
+                                }
                             }
-                            // 跳过的必须说清为什么，否则用户只会看到"少了几个"却不知道少在哪
-                            if (report.skipped.isNotEmpty()) {
-                                append("；跳过 ${report.skipped.size}（")
-                                append(report.skipped.take(2).joinToString("；"))
-                                append("）")
-                            }
-                        }
-                    )
-                }
-                .onFailure { messages.emit("导入失败: ${it.message?.take(80)}") }
-            _importing.value = false
+                        )
+                    }
+                    .onFailure {
+                        // 离开页面取消的导入不是「导入失败」：吞掉取消还会让协程带着假结果往下走
+                        if (it is CancellationException) throw it
+                        messages.emit("导入失败: ${it.message?.take(80)}")
+                    }
+            } finally {
+                _importing.value = false
+            }
         }
     }
 

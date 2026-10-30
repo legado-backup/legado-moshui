@@ -41,7 +41,6 @@ import com.radium.inkwell.ui.components.rememberAppTopBarScroll
 import com.radium.inkwell.ui.components.topBarScroll
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
 import com.radium.inkwell.ui.components.Dimens
 import com.radium.inkwell.ui.components.SectionHeader
 import com.radium.inkwell.ui.components.settingsPageColor
@@ -195,7 +194,7 @@ private fun ThemeSwatch(
                 .size(Dimens.swatch)
                 .background(bg, CircleShape)
                 .border(
-                    width = if (selected) 2.dp else 1.dp,
+                    width = if (selected) Dimens.strokeThick else Dimens.strokeThin,
                     color = if (selected) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.outlineVariant,
                     shape = CircleShape,
@@ -272,7 +271,7 @@ private fun CustomThemeEditor(
                 shape = MaterialTheme.shapes.medium,
                 color = previewScheme.background,
                 border = androidx.compose.foundation.BorderStroke(
-                    Dimens.gapXS / 4,
+                    Dimens.strokeThin,
                     MaterialTheme.colorScheme.outlineVariant,
                 ),
             ) {

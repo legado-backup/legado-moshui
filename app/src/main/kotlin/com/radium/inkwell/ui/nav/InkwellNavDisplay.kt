@@ -40,6 +40,7 @@ import com.radium.inkwell.ui.components.Dimens
 import com.radium.inkwell.ui.components.Motion
 import com.radium.inkwell.ui.components.animationsEnabled
 import com.radium.inkwell.ui.detail.BookDetailScreen
+import com.radium.inkwell.ui.detail.BookDetailViewModel
 import com.radium.inkwell.ui.explore.ExploreScreen
 import androidx.navigationevent.NavigationEventTransitionState
 import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
@@ -200,17 +201,21 @@ fun InkwellNavDisplay() {
                     onOpenSearch = { nav.go(SearchRoute()) },
                     onOpenExplore = { nav.go(ExploreRoute) },
                     onOpenSettings = { nav.go(SettingsRoute) },
+                    // 只管宽屏：右栏就在收好的书架旁边，还摊着隐藏书的详情一眼就露了。
+                    // 窄屏的详情是整页盖在书架上的，和从隐藏区点开的阅读页一样，读完自己回来
+                    onHiddenCollapsed = { ids -> if (dualPane) nav.closeBookDetail(ids) },
                     viewModel = vm,
                 )
             }
             entry<BookDetailRoute>(
                 metadata = ListDetailSceneStrategy.detailPane(sceneKey = NavPaneGroup.BOOKSHELF),
             ) { route ->
+                val vm = koinViewModel<BookDetailViewModel> { parametersOf(route.bookId) }
                 BookDetailScreen(
-                    bookId = route.bookId,
                     showBack = !dualPane,
                     onRead = { nav.openBook(route.bookId, TransformOrigin.Center) },
                     onBack = { nav.back() },
+                    viewModel = vm,
                 )
             }
             entry<ReaderRoute>(metadata = readerMeta) { route ->

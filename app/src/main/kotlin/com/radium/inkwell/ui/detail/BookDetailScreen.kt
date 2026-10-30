@@ -26,21 +26,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import com.radium.inkwell.data.db.dao.ChapterDao
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.data.db.entity.BookEntity
 import com.radium.inkwell.data.db.entity.BookType
-import com.radium.inkwell.data.db.entity.ChapterEntity
-import com.radium.inkwell.data.repo.BookRepository
-import com.radium.inkwell.data.repo.BookSourceRepository
-import com.radium.inkwell.data.repo.NetBookRepository
 import com.radium.inkwell.ui.components.AppIconButton
 import com.radium.inkwell.ui.components.AppLoadingIndicator
 import com.radium.inkwell.ui.components.AppTopBar
@@ -50,115 +43,31 @@ import com.radium.inkwell.ui.components.AppSnackbarHost
 import com.radium.inkwell.ui.components.BookCover
 import com.radium.inkwell.core.util.htmlToPlainText
 import com.radium.inkwell.ui.components.ChapterListItem
+import com.radium.inkwell.ui.components.CollectMessages
 import com.radium.inkwell.ui.components.Dimens
 import com.radium.inkwell.ui.components.EmptyState
 import com.radium.inkwell.ui.components.LoadingState
 import com.radium.inkwell.ui.components.PrimaryButton
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.launch
-import org.koin.compose.koinInject
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BookDetailScreen(
-    bookId: String,
     onRead: () -> Unit,
     onBack: () -> Unit,
     /** 宽屏 list-detail 并排时隐藏返回；窄屏仍显示 */
     showBack: Boolean = true,
+    viewModel: BookDetailViewModel,
 ) {
-    val bookRepo = koinInject<BookRepository>()
-    val netBookRepo = koinInject<NetBookRepository>()
-    val sourceRepo = koinInject<BookSourceRepository>()
-    val chapterDao = koinInject<ChapterDao>()
-    val scope = rememberCoroutineScope()
+    val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
-
-    var refreshing by remember { mutableStateOf(false) }
-    // 区分"还在查库"和"查完了没这本书"：前者转圈，后者给空态
-    var loaded by remember(bookId) { mutableStateOf(false) }
-    val book by produceState<BookEntity?>(initialValue = null, bookId) {
-        // 追更会改 totalChapters / coverPath / intro —— 订阅书行，刷新后 UI 自动跟上，
-        // 不必再靠 reloadKey 整页重拉。
-        bookRepo.observeBook(bookId).collect {
-            value = it
-            loaded = true
-        }
+    CollectMessages(viewModel.messages, snackbar)
+    // 点目录：进度写完才进阅读器（见 BookDetailViewModel.openChapter）
+    LaunchedEffect(Unit) {
+        viewModel.openReader.collect { onRead() }
     }
-    val chapters by produceState(emptyList<ChapterEntity>(), bookId) {
-        chapterDao.observeByBook(bookId).collect { value = it }
-    }
-
-    /**
-     * 追更。返回新增章数。
-     *
-     * 顺带：封面为空时 refreshToc 会补抓详情（见 NetBookRepository）——
-     * WebDAV 同步下来的书缺封面、缺目录，进详情自动跑一次就能两边都补齐。
-     */
-    suspend fun refreshToc(quiet: Boolean = false): Result<Int> {
-        val b = book ?: return Result.failure(IllegalStateException("书不存在"))
-        val rule = b.sourceId?.let { sourceRepo.getRule(it) }
-        if (rule == null) {
-            val err = IllegalStateException("书源不存在，先换源")
-            if (!quiet) snackbar.showSnackbar(err.message!!)
-            return Result.failure(err)
-        }
-        return netBookRepo.refreshToc(b, rule)
-            .onSuccess { added ->
-                if (!quiet) {
-                    snackbar.showSnackbar(
-                        if (added > 0) "更新了 $added 章" else "已经是最新的了",
-                    )
-                }
-            }
-            .onFailure {
-                if (!quiet) snackbar.showSnackbar("刷新失败: ${it.message}")
-            }
-    }
-
-    fun triggerRefresh(quiet: Boolean = false) {
-        if (refreshing) return
-        refreshing = true
-        scope.launch {
-            try {
-                refreshToc(quiet = quiet)
-            } finally {
-                refreshing = false
-            }
-        }
-    }
-
-    // WebDAV 只同步书行、不同步章节表。同步下来的网络书进详情时目录是空的 ——
-    // 以前要等进阅读器才补抓，详情页自己却装聋作哑（菜单还写着「目录」）。
-    // 进页发现章节表为空就自动追更一次；失败不弹窗打扰，留给下面的空态重试出口。
-    var autoFetchAttempted by remember(bookId) { mutableStateOf(false) }
-    LaunchedEffect(bookId, book?.id) {
-        val b = book ?: return@LaunchedEffect
-        if (autoFetchAttempted) return@LaunchedEffect
-        if (b.type != BookType.NET) return@LaunchedEffect
-        autoFetchAttempted = true
-        // 直接查库，避开 Flow 首帧还是 emptyList 时误触发
-        if (chapterDao.getByBook(bookId).isNotEmpty()) return@LaunchedEffect
-        refreshing = true
-        try {
-            refreshToc(quiet = true)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            // quiet：空态里有重试
-        } finally {
-            refreshing = false
-        }
-    }
-
-    fun openReader(chapterIndex: Int? = null) {
-        scope.launch {
-            if (chapterIndex != null) {
-                bookRepo.saveProgress(bookId, chapterIndex, 0)
-            }
-            onRead()
-        }
-    }
+    val book = state.book
+    val chapters = state.chapters
+    val refreshing = state.refreshing
 
     val topBarScroll = rememberAppTopBarScroll()
     Scaffold(
@@ -168,7 +77,7 @@ fun BookDetailScreen(
             AppTopBar("书籍详情", topBarScroll, onBack = onBack.takeIf { showBack }) {
                 if (book?.type == BookType.NET) {
                     AppIconButton(
-                        onClick = { triggerRefresh(quiet = false) },
+                        onClick = { viewModel.refresh() },
                         enabled = !refreshing,
                     ) {
                         if (refreshing) {
@@ -184,7 +93,7 @@ fun BookDetailScreen(
     ) { padding ->
         val b = book
         if (b == null) {
-            if (loaded) {
+            if (state.loaded) {
                 EmptyState(
                     icon = Icons.Default.Warning,
                     title = "书籍不存在",
@@ -204,7 +113,7 @@ fun BookDetailScreen(
                 Header(
                     book = b,
                     chapterCount = chapters.size.takeIf { it > 0 } ?: b.totalChapters,
-                    onRead = { openReader() },
+                    onRead = onRead,
                 )
             }
             item {
@@ -249,7 +158,7 @@ fun BookDetailScreen(
                             )
                             if (b.type == BookType.NET) {
                                 AppTextButton(
-                                    onClick = { triggerRefresh(quiet = false) },
+                                    onClick = { viewModel.refresh() },
                                     enabled = !refreshing,
                                 ) {
                                     Text("重新获取")
@@ -264,7 +173,7 @@ fun BookDetailScreen(
                         ChapterListItem(
                             title = chapter.title,
                             selected = current,
-                            onClick = { openReader(chapter.index) },
+                            onClick = { viewModel.openChapter(chapter.index) },
                         )
                     }
                 }
@@ -295,6 +204,8 @@ private fun Header(
                     height = Dimens.coverDetailHeight,
                 ),
                 placeholderChars = 4,
+                // 书名就在右边，封面不再进读屏
+                contentDescription = null,
             )
             Column(Modifier.padding(start = Dimens.gapL).align(Alignment.CenterVertically)) {
                 Text(book.title, style = MaterialTheme.typography.titleLarge, maxLines = 2)

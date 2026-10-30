@@ -13,7 +13,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -22,12 +21,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.data.prefs.AppPrefs
 import com.radium.inkwell.data.repo.ChapterContentCache
 import com.radium.inkwell.ui.components.AppAlertDialog
 import com.radium.inkwell.ui.components.AppSnackbarHost
 import com.radium.inkwell.ui.components.AppTopBar
+import com.radium.inkwell.ui.components.CollectMessages
 import com.radium.inkwell.ui.components.Dimens
+import com.radium.inkwell.ui.components.MessageBus
 import com.radium.inkwell.ui.components.OptionPickerSheet
 import com.radium.inkwell.ui.components.PickerOption
 import com.radium.inkwell.ui.components.SectionHeader
@@ -66,12 +68,16 @@ fun SettingsScreen(
     val appPrefs = koinInject<AppPrefs>()
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    val updateCheck = rememberUpdateCheckState(snackbar)
+    // 提示一律走 MessageBus：emit 不挂起，转圈/「正在检查…」不必陪着提示多挂 4 秒，
+    // 新提示也直接替换正在显示的那条
+    val messages = remember { MessageBus() }
+    CollectMessages(messages, snackbar)
+    val updateCheck = rememberUpdateCheckState(messages)
     var confirmClearCache by remember { mutableStateOf(false) }
     var showPrunePicker by remember { mutableStateOf(false) }
     var cacheBytes by remember { mutableLongStateOf(-1L) }
-    val pruneDays by appPrefs.cacheAutoPruneDays.collectAsState(
-        initial = AppPrefs.DEFAULT_CACHE_AUTO_PRUNE_DAYS,
+    val pruneDays by appPrefs.cacheAutoPruneDays.collectAsStateWithLifecycle(
+        initialValue = AppPrefs.DEFAULT_CACHE_AUTO_PRUNE_DAYS,
     )
 
     suspend fun refreshCacheSize() {
@@ -235,7 +241,7 @@ fun SettingsScreen(
                 scope.launch {
                     withContext(Dispatchers.IO) { cache.clearAll() }
                     refreshCacheSize()
-                    snackbar.showSnackbar("已清除正文缓存")
+                    messages.emit("已清除正文缓存")
                 }
             },
         )

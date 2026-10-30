@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -27,7 +28,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.rememberModalBottomSheetState
 import com.radium.inkwell.ui.components.AppAlertDialog
 import com.radium.inkwell.ui.components.AppIconButton
 import com.radium.inkwell.ui.components.AppSnackbarHost
@@ -40,13 +43,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import com.radium.inkwell.ui.components.PrimaryButton
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.data.db.entity.ReplaceRuleEntity
+import kotlinx.coroutines.launch
 import com.radium.inkwell.ui.components.CollectMessages
 import com.radium.inkwell.ui.components.ContentListDefaults
 import com.radium.inkwell.ui.components.ContentListItem
@@ -79,7 +88,9 @@ fun ReplaceRuleScreen(
         },
         snackbarHost = { AppSnackbarHost(snackbar) },
     ) { padding ->
-        if (state.rules.isEmpty()) {
+        if (!state.rulesLoaded) {
+            // 库还没读回来：先空着，别闪一下「还没有净化规则」
+        } else if (state.rules.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(padding)) {
                 EmptyState(
                     icon = Icons.Default.CleaningServices,
@@ -106,15 +117,49 @@ fun ReplaceRuleScreen(
     }
 
     state.editing?.let { draft ->
-        ModalBottomSheet(onDismissRequest = viewModel::dismissEditor) {
+        // 有没保存的改动时，下滑、点遮罩、按返回都先问一句 —— 从前一碰就关，填了半天的正则说没就没。
+        // 拦在 confirmValueChange 上：它说不，面板就不会收起，onDismissRequest 也不会来。
+        // 「放弃」之后自己收起面板，那一下要放行（discarding），否则又被这里拦回去。
+        val scope = rememberCoroutineScope()
+        var askDiscard by remember { mutableStateOf(false) }
+        var discarding by remember { mutableStateOf(false) }
+        val dirty by rememberUpdatedState(state.editorDirty)
+        val sheetState = rememberModalBottomSheetState(
+            confirmValueChange = { target ->
+                if (target == SheetValue.Hidden && dirty && !discarding) {
+                    askDiscard = true
+                    false
+                } else {
+                    true
+                }
+            },
+        )
+        ModalBottomSheet(onDismissRequest = viewModel::dismissEditor, sheetState = sheetState) {
             Editor(
                 draft = draft,
                 sampleText = state.sampleText,
                 sampleResult = state.sampleResult,
                 patternError = state.patternError,
+                saving = state.saving,
                 onChange = viewModel::updateDraft,
                 onSampleChange = viewModel::updateSample,
                 onSave = viewModel::save,
+            )
+        }
+        if (askDiscard) {
+            AppAlertDialog(
+                onDismissRequest = { askDiscard = false },
+                title = "放弃编辑？",
+                text = "这条规则的改动还没保存，关掉就没了。",
+                confirmText = "放弃",
+                dismissText = "继续编辑",
+                onConfirm = {
+                    askDiscard = false
+                    discarding = true
+                    scope.launch { sheetState.hide() }.invokeOnCompletion {
+                        if (!sheetState.isVisible) viewModel.dismissEditor()
+                    }
+                },
             )
         }
     }
@@ -145,15 +190,21 @@ private fun RuleRow(
         colors = settingsStackListColors(),
         trailingContent = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // 删除在前、开关在后、删除图标用 outline 灰：与书源/订阅列表的行尾一致
+                // 删除在前、开关在后：与书源/订阅列表的行尾一致。图标走 onSurfaceVariant ——
+                // outline 只给边框/分隔线，拿它画可点的图标在浅色下对比度不够（约 3.9:1）
                 AppIconButton(onClick = onDelete) {
                     Icon(
                         Icons.Default.Delete,
                         contentDescription = "删除",
-                        tint = MaterialTheme.colorScheme.outline,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Switch(checked = rule.enabled, onCheckedChange = onToggle)
+                Switch(
+                    checked = rule.enabled,
+                    onCheckedChange = onToggle,
+                    // 行尾开关自己是一个焦点，得有名字：只念「开关，已开启」听不出开的是哪条规则
+                    modifier = Modifier.semantics { contentDescription = "启用「${rule.name}」" },
+                )
             }
         },
         supportingContent = {
@@ -186,8 +237,9 @@ private fun RuleRow(
 private fun Editor(
     draft: ReplaceRuleEntity,
     sampleText: String,
-    sampleResult: String,
+    sampleResult: String?,
     patternError: String?,
+    saving: Boolean,
     onChange: (ReplaceRuleEntity) -> Unit,
     onSampleChange: (String) -> Unit,
     onSave: () -> Unit,
@@ -228,7 +280,19 @@ private fun Editor(
             placeholder = { Text("留空即删除") },
             modifier = Modifier.fillMaxWidth(),
         )
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        // 整行就是一个开关（读屏一个焦点，念「使用正则表达式，开关」），行内 Switch 只做展示；
+        // Switch 只展示时不再自带 48dp 触控区，行自己撑够
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = Dimens.touchTarget)
+                .toggleable(
+                    value = draft.isRegex,
+                    role = Role.Switch,
+                    onValueChange = { onChange(draft.copy(isRegex = it)) },
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Column(Modifier.weight(1f)) {
                 Text("使用正则表达式", style = MaterialTheme.typography.bodyMedium)
                 Text(
@@ -239,7 +303,7 @@ private fun Editor(
             }
             Switch(
                 checked = draft.isRegex,
-                onCheckedChange = { onChange(draft.copy(isRegex = it)) },
+                onCheckedChange = null,
             )
         }
         OutlinedTextField(
@@ -264,7 +328,9 @@ private fun Editor(
             maxLines = 4,
             modifier = Modifier.fillMaxWidth(),
         )
-        if (sampleText.isNotEmpty()) {
+        // sampleResult 为 null = 规则还没写、或正则有误（错误已标在「替换什么」下面）：不显示结果，
+        // 更不能当成「被删光了」标红
+        if (sampleText.isNotEmpty() && sampleResult != null) {
             Text(
                 "替换后",
                 style = MaterialTheme.typography.labelMedium,
@@ -280,7 +346,12 @@ private fun Editor(
 
         Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
             Spacer(Modifier.weight(1f))
-            PrimaryButton(text = "保存", onClick = onSave, enabled = patternError == null)
+            PrimaryButton(
+                text = "保存",
+                onClick = onSave,
+                enabled = patternError == null && !saving,
+                loading = saving,
+            )
         }
     }
 }

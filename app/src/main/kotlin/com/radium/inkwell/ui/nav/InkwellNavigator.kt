@@ -29,6 +29,20 @@ class InkwellNavigator(private val backStack: NavBackStack<NavKey>) {
         openOrigin.value = origin
         go(ReaderRoute(bookId))
     }
+
+    /** 栈顶是 [bookIds] 里某本书的详情就关掉它（隐藏区收起时用，见 BookshelfScreen） */
+    fun closeBookDetail(bookIds: Set<String>) {
+        backStack.closeBookDetail(bookIds)
+    }
+}
+
+/**
+ * [InkwellNavigator.closeBookDetail] 的规则本体，同 [navigateTo] 写成扩展以便单测。
+ * 只看栈顶：详情上面又压了别的页（比如进了阅读页）时不去动它，免得从中间抽走一层。
+ */
+internal fun MutableList<NavKey>.closeBookDetail(bookIds: Set<String>) {
+    val top = lastOrNull()
+    if (top is BookDetailRoute && top.bookId in bookIds) removeLastOrNull()
 }
 
 /**

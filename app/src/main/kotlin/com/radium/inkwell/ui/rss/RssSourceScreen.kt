@@ -36,6 +36,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.data.db.entity.RssSourceEntity
@@ -103,7 +105,9 @@ fun RssSourceScreen(
         },
         snackbarHost = { AppSnackbarHost(snackbar) },
     ) { padding ->
-        if (sources.isEmpty()) {
+        // null = 库还没读回来：先空着，别闪一下「还没有订阅源」
+        val list = sources ?: return@Scaffold
+        if (list.isEmpty()) {
             EmptyState(
                 icon = Icons.Default.RssFeed,
                 title = "还没有订阅源",
@@ -118,23 +122,29 @@ fun RssSourceScreen(
                 contentPadding = ContentListDefaults.listContentPadding(),
                 verticalArrangement = Arrangement.spacedBy(ContentListDefaults.ListSpacing),
             ) {
-                items(sources, key = { it.id }) { source ->
+                items(list, key = { it.id }) { source ->
                     ContentListItem(
                         onClick = { onOpenSource(source.id) },
                         enabled = source.enabled,
                         colors = settingsStackListColors(),
                         trailingContent = {
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                // 删除图标走 onSurfaceVariant：outline 只给边框/分隔线用，
+                                // 拿它画可点的图标在浅色下对比度不够（约 3.9:1）
                                 AppIconButton(onClick = { deleteTarget = source }) {
                                     Icon(
                                         Icons.Default.Delete,
                                         contentDescription = "删除",
-                                        tint = MaterialTheme.colorScheme.outline,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                                 Switch(
                                     checked = source.enabled,
                                     onCheckedChange = { viewModel.setEnabled(source.id, it) },
+                                    // 行尾开关自己是一个焦点，得有名字：只念「开关，已开启」听不出开的是哪个源
+                                    modifier = Modifier.semantics {
+                                        contentDescription = "启用「${source.name}」"
+                                    },
                                 )
                             }
                         },

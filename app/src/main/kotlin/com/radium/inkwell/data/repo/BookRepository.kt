@@ -53,10 +53,16 @@ class BookRepository(
      * **必须排除墓碑和试读未上架**（getAllVisible 而非 getAll）：删过的书行还在库里，若把它也
      * 认成"已在书架"，预览页会显示「已在书架」而书架上根本没有 —— 加不进去（被这里挡住）、
      * 点"读"打开的是那条墓碑（读得了但永远不回书架）。试读行同样不在架上，不能当成已加入。
+     *
+     * [includeHidden] = false：**隐藏的书也当作不在架上**。隐藏区上了锁时搜索/预览走这条 ——
+     * 认成「已在书架」等于当着旁人说「这本我藏着」，点「开始阅读」还会不经验证直接把它打开。
+     * 默认 true 保持原语义：没上锁时隐藏只是把书从列表里收起来，它仍然在架上。
      */
-    suspend fun shelfBookIdByKey(title: String, author: String?): String? {
+    suspend fun shelfBookIdByKey(title: String, author: String?, includeHidden: Boolean = true): String? {
         val key = bookKey(title, author)
-        return bookDao.getAllVisible().firstOrNull { bookKey(it.title, it.author) == key }?.id
+        return bookDao.getAllVisible().firstOrNull {
+            (includeHidden || !it.hidden) && bookKey(it.title, it.author) == key
+        }?.id
     }
 
     /**

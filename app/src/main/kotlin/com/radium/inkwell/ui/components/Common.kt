@@ -32,10 +32,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
 import coil3.request.ImageRequest
@@ -136,7 +136,7 @@ fun AppLoadingIndicator(
     if (size != null && size < floor) {
         CircularProgressIndicator(
             modifier = modifier.size(size),
-            strokeWidth = 2.dp,
+            strokeWidth = Dimens.strokeThick,
             color = color,
         )
     } else {
@@ -170,6 +170,10 @@ fun DeterminateProgressBar(
  * 于是「有封面地址、但抓不下来」这种最常见的情况（书源的图床挂了、防盗链、超时）
  * 落进 AsyncImage 的失败分支后就是一整块空白灰方 —— 连书名都没有，用户根本认不出是哪本书。
  * 垫在底层就不必去猜 Coil 的加载状态：成功即遮住，失败即透出。
+ *
+ * @param contentDescription 读屏念的名字。书名就印在旁边（列表行标题、书架卡片下的书名、详情页抬头）
+ *   时传 null —— 封面整块不进读屏，否则同一个书名连念两遍（默认封面上那行字还会再念一遍截断的）。
+ *   默认仍是书名，给「只有一张封面、旁边没字」的地方用（进书 splash）。
  */
 @Composable
 fun BookCover(
@@ -177,12 +181,13 @@ fun BookCover(
     coverModel: Any?,
     modifier: Modifier = Modifier,
     placeholderChars: Int = 4,
+    contentDescription: String? = title,
 ) {
     Surface(
-        modifier = modifier,
+        modifier = if (contentDescription == null) modifier.clearAndSetSemantics {} else modifier,
         shape = MaterialTheme.shapes.small,
+        // 不加 tonalElevation：底色不是 surface 时它本就不起作用，这层底色也总被默认封面整块盖住
         color = MaterialTheme.colorScheme.surfaceVariant,
-        tonalElevation = 1.dp,
     ) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             var loaded by remember(coverModel) { mutableStateOf(false) }
@@ -202,7 +207,7 @@ fun BookCover(
                 }
                 AsyncImage(
                     model = request,
-                    contentDescription = title,
+                    contentDescription = contentDescription,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
                     onSuccess = { loaded = true },
@@ -235,7 +240,8 @@ private fun DefaultCover(title: String, maxChars: Int) {
             title.take(maxChars),
             Modifier
                 .align(Alignment.Center)
-                .padding(start = 12.dp, end = 6.dp),
+                // 左边多让一格给书脊，字才看着落在「封面」正中而不是压着书脊
+                .padding(start = Dimens.gapM, end = Dimens.gapXS),
             style = MaterialTheme.typography.titleSmall,
             color = Color.White.copy(alpha = 0.92f),
             textAlign = TextAlign.Center,
@@ -317,6 +323,8 @@ fun BookListRow(
                     height = Dimens.coverThumbHeight,
                 ),
                 placeholderChars = 2,
+                // 书名就是这一行的标题，读屏不必再念一遍封面
+                contentDescription = null,
             )
         },
         trailingContent = {

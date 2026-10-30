@@ -71,6 +71,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.material3.ModalBottomSheet
@@ -108,6 +109,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.data.db.entity.BookEntity
 import com.radium.inkwell.ui.components.BookCover
@@ -136,6 +139,11 @@ fun BookshelfScreen(
     onOpenSearch: () -> Unit,
     onOpenExplore: () -> Unit,
     onOpenSettings: () -> Unit,
+    /**
+     * 隐藏区收起了（✕、长按收摊、切后台自动收起都算），带上此刻隐藏的书 id。
+     * 宽屏右栏若正开着其中一本的详情，由导航层关掉 —— 书架这一栏管不到旁边那一栏。
+     */
+    onHiddenCollapsed: (hiddenIds: Set<String>) -> Unit,
     viewModel: BookshelfViewModel,
 ) {
     val books by viewModel.books.collectAsStateWithLifecycle()
@@ -170,7 +178,12 @@ fun BookshelfScreen(
     val activity = LocalActivity.current as? androidx.fragment.app.FragmentActivity
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val biometricAvailable = remember { BiometricAuth.isAvailable(context) }
+    // 不能进页记一次就完：用户可能切去系统设置删掉（或重新设上）锁屏再回来。
+    // 每回到前台重查一次，点开隐藏区时还会再现查一遍（见 revealHidden）
+    var biometricAvailable by remember { mutableStateOf(BiometricAuth.isAvailable(context)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        biometricAvailable = BiometricAuth.isAvailable(context)
+    }
     val haptic = LocalHapticFeedback.current
 
     // 滚动状态提到这里，展开隐藏区时要能把它拨回顶部（见下面的 LaunchedEffect）
@@ -203,10 +216,22 @@ fun BookshelfScreen(
     /**
      * 展开隐藏书籍。开了验证就先过一遍系统的指纹/面容/设备密码。
      * 收起不需要验证 —— 关灯不用钥匙。
+     *
+     * 设备上已经没有任何锁屏（用户在系统设置里删了密码）时**不验证、直接放行**并说明原因：
+     * 那种状态下 authenticate 每次都失败，而关掉「展开需验证」的开关就长在隐藏区里 ——
+     * 进不去就关不掉，书被永久锁在外面。这把锁本就没有找回途径（见 AppPrefs.hiddenRequireAuth），
+     * 宁可放行，也不能把人关在自己的书外面。
      */
     fun revealHidden() {
         if (!requireAuth || activity == null) {
             openHidden()
+            return
+        }
+        // 点下去这一刻现查，别信进页时记下的那份
+        biometricAvailable = BiometricAuth.isAvailable(context)
+        if (!biometricAvailable) {
+            openHidden()
+            viewModel.messages.emit("这台设备没有设置锁屏，已跳过验证。不需要这把锁的话，可以在上方关掉它")
             return
         }
         scope.launch {
@@ -219,9 +244,37 @@ fun BookshelfScreen(
         }
     }
 
+    // 隐藏区收起时（✕、长按收摊、切后台自动收起），还开着的长按面板 / 分组 / 删除弹窗若指着一本
+    // 隐藏书，一并关掉 —— 否则切回来书架已经收好，面板上却还摊着那本隐藏书的书名。
+    // 宽屏右栏的详情交给导航层（onHiddenCollapsed）。只认「开 → 收」这一下：进页时本来就是收着的，
+    // 那时去动导航栈，正赶上侧滑返回的话会把栈多弹一层。
+    val currentOnHiddenCollapsed by rememberUpdatedState(onHiddenCollapsed)
+    var wasShowingHidden by remember { mutableStateOf(showHidden) }
+    LaunchedEffect(showHidden) {
+        if (wasShowingHidden && !showHidden) {
+            if (actionTarget?.hidden == true) actionTarget = null
+            if (groupTarget?.hidden == true) {
+                groupTarget = null
+                groupInput = ""
+            }
+            if (deleteTarget?.hidden == true) deleteTarget = null
+            currentOnHiddenCollapsed(allBooks.filter { it.hidden }.mapTo(HashSet()) { it.id })
+        }
+        wasShowingHidden = showHidden
+    }
+
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris -> viewModel.importBooks(uris) }
+
+    fun launchImport() {
+        importLauncher.launch(
+            arrayOf(
+                "text/plain", "application/epub+zip",
+                "application/octet-stream", "application/x-mobipocket-ebook",
+            )
+        )
+    }
 
     // 与设置页同一套画布：浅色灰底、深色黑底（见 settingsPageColor），进出设置不再闪白。
     val pageColor = settingsPageColor()
@@ -341,14 +394,7 @@ fun BookshelfScreen(
                         }
                         // 导入从右下角的 FAB 挪上来：书架是个网格，FAB 会盖住右下角那本书
                         AppIconButton(
-                            onClick = {
-                                importLauncher.launch(
-                                    arrayOf(
-                                        "text/plain", "application/epub+zip",
-                                        "application/octet-stream", "application/x-mobipocket-ebook",
-                                    )
-                                )
-                            },
+                            onClick = ::launchImport,
                             enabled = !importing,
                         ) {
                             if (importing) {
@@ -383,32 +429,24 @@ fun BookshelfScreen(
         },
         snackbarHost = { AppSnackbarHost(snackbar) },
     ) { padding ->
+        // Room 第一帧还没到：先空着。这时 allBooks 的空不代表书架是空的，落进下面的空态
+        // 就是每次启动都先闪一下「书架空空如也 / 导入本地书」。本地库通常几十毫秒就回来，转圈也只会一闪
+        if (!shelfReady) return@Scaffold
         // 「全部隐藏」要按**整个书架**判，不能拿分组筛选后的 books 判：选中一个恰好没有可见书的
         // 分组时 books 也是空的，若在这里整页换成空态，筛选条跟着一起消失，用户就没法切回「全部」了 ——
         // 分组为空另有下面 ChipRow 之下的提示。
-        if (allBooks.isNotEmpty() && hiddenCount == allBooks.size && !showHidden) {
-            // 书全被隐藏了。这里**不能**写「N 本书已隐藏」—— 那等于把秘密写在最显眼的地方。
-            // 就显示一个和真正空书架一模一样的空态：别人看不出区别，而你知道长按标题能回来。
-            EmptyState(
-                icon = Icons.Default.AutoStories,
-                title = "书架空空如也",
-                hint = "导入本地 txt / EPUB / MOBI，或搜索已导入的规则",
-                modifier = Modifier.padding(padding),
-            )
-        } else if (allBooks.isEmpty()) {
+        //
+        // 书全被隐藏了也走这同一个空态。这里**不能**写「N 本书已隐藏」—— 那等于把秘密写在最显眼的地方。
+        // 必须和真正的空书架一模一样（连「导入本地书」按钮也在）：别人看不出区别，而你知道长按标题能回来。
+        // 从前是两段各写一份，全隐藏那份漏了导入按钮，一眼就和真空架对不上 —— 所以合成一个分支。
+        val allHidden = allBooks.isNotEmpty() && hiddenCount == allBooks.size && !showHidden
+        if (allBooks.isEmpty() || allHidden) {
             EmptyState(
                 icon = Icons.Default.AutoStories,
                 title = "书架空空如也",
                 hint = "导入本地 txt / EPUB / MOBI，或搜索已导入的规则",
                 actionLabel = "导入本地书",
-                onAction = {
-                    importLauncher.launch(
-                        arrayOf(
-                            "text/plain", "application/epub+zip",
-                            "application/octet-stream", "application/x-mobipocket-ebook",
-                        )
-                    )
-                },
+                onAction = ::launchImport,
                 modifier = Modifier.padding(padding),
             )
         } else {
@@ -577,7 +615,10 @@ fun BookshelfScreen(
         }
     }
 
-    actionTarget?.let { book ->
+    // 指着隐藏书的面板/弹窗，在隐藏区收起的那一帧就别画了（状态由上面的 LaunchedEffect 清，它晚一帧）
+    fun BookEntity.stillVisible() = showHidden || !hidden
+
+    actionTarget?.takeIf { it.stillVisible() }?.let { book ->
         ModalBottomSheet(
             onDismissRequest = { actionTarget = null },
             // Sheet 用 surface；SettingRow 卡片读 surfaceContainerLow。
@@ -648,7 +689,7 @@ fun BookshelfScreen(
         }
     }
 
-    groupTarget?.let { book ->
+    groupTarget?.takeIf { it.stillVisible() }?.let { book ->
         fun dismissGroupTarget() {
             groupTarget = null
             groupInput = ""
@@ -678,7 +719,7 @@ fun BookshelfScreen(
         )
     }
 
-    deleteTarget?.let { book ->
+    deleteTarget?.takeIf { it.stillVisible() }?.let { book ->
         AppAlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = "删除书籍",
@@ -848,6 +889,8 @@ private fun BookShelfListLeading(
                 )
                 .onGloballyPositioned { onBounds(it.boundsInWindow()) },
             placeholderChars = 2,
+            // 书名是这一行的标题，封面不再进读屏
+            contentDescription = null,
         )
         if (book.hidden) {
             Icon(
@@ -907,7 +950,12 @@ private fun BookCard(
                     this.selected = selected
                 }
             }
-            .combinedClickable(onClick = { onClick(coverBounds) }, onLongClick = onLongClick)
+            .combinedClickable(
+                // 平时整张卡就是一个按钮（点开读、长按出面板）；多选时角色由上面的 Checkbox 给
+                role = if (selectionMode) null else Role.Button,
+                onClick = { onClick(coverBounds) },
+                onLongClick = onLongClick,
+            )
     ) {
         // 多选态外圈留出与描边等宽的 padding：未选不画边、已选才描 primary，
         // 占位却始终在 —— 勾选不会把封面挤小一圈。
@@ -936,6 +984,8 @@ private fun BookCard(
                     .onGloballyPositioned { coverBounds = it.boundsInWindow() },
                 // 默认封面有三行可用，别把书名截半截：「女总裁的全能兵王」take(6) = 「女总裁的全能」
                 placeholderChars = 14,
+                // 卡片下面就印着书名，封面不再进读屏
+                contentDescription = null,
             )
             // MD3 tonal：已选盖一层 primary 半透明，比给每本套灰框更轻、也更像系统相册多选
             if (selectionMode && selected) {
@@ -1024,6 +1074,9 @@ private fun BookCard(
  * 形态对齐设置分组卡：`large` 圆角 + [settingsCardColor]（书架画布已与设置页同用
  * [settingsPageColor]，浅色灰底白卡 / 深色黑底浅卡）。
  * 开关行语义与 [SwitchRow] 相同：整行可点，Switch 只展示；✕ 不进开关焦点。
+ *
+ * 设备上没有锁屏时开不了锁（无从验证），但**已经开着的锁必须关得掉**：用户删了锁屏密码之后，
+ * 偏好里还记着「需验证」，这时把开关置灰，等他哪天重新设上锁屏，锁又悄悄生效了，而他以为早关了。
  */
 @Composable
 private fun HiddenStatusBar(
@@ -1033,14 +1086,16 @@ private fun HiddenStatusBar(
     onCollapse: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val authOn = requireAuth && biometricAvailable
+    // 开关显示的是偏好本身；能不能拨：能验证就能开关，不能验证则只许关
+    val toggleEnabled = biometricAvailable || requireAuth
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     Surface(
         modifier
             .fillMaxWidth()
             .padding(horizontal = Dimens.listHorizontal)
-            .padding(vertical = Dimens.gapM / 2),
+            // 与 SettingGroup 上下同一档留白
+            .padding(vertical = Dimens.gapS),
         shape = MaterialTheme.shapes.large,
         color = settingsCardColor(),
     ) {
@@ -1051,14 +1106,14 @@ private fun HiddenStatusBar(
             // 开关区吃掉剩余宽度；形用 Middle（直角），外层 Surface 裁出大圆角，
             // 避免 Alone 四角圆贴到 ✕ 左侧看起来像两块卡。
             ContentListItem(
-                checked = authOn,
+                checked = requireAuth,
                 onCheckedChange = onToggleAuth,
                 modifier = Modifier.weight(1f),
-                enabled = biometricAvailable,
+                enabled = toggleEnabled,
                 trailingContent = {
                     Switch(
-                        checked = authOn,
-                        enabled = biometricAvailable,
+                        checked = requireAuth,
+                        enabled = toggleEnabled,
                         onCheckedChange = null,
                     )
                 },
@@ -1067,7 +1122,11 @@ private fun HiddenStatusBar(
                 interactionSource = interactionSource,
                 content = {
                     Text(
-                        if (biometricAvailable) "展开需验证" else "无法上锁",
+                        when {
+                            biometricAvailable -> "展开需验证"
+                            requireAuth -> "未设锁屏，验证暂不生效"
+                            else -> "无法上锁"
+                        },
                         style = MaterialTheme.typography.bodyLarge,
                         color = if (biometricAvailable) {
                             MaterialTheme.colorScheme.onSurface

@@ -5,11 +5,13 @@ import androidx.lifecycle.viewModelScope
 import com.radium.inkwell.core.source.RemoteBookDetail
 import com.radium.inkwell.core.source.RemoteChapter
 import com.radium.inkwell.core.source.SearchResult
+import com.radium.inkwell.data.prefs.AppPrefs
 import com.radium.inkwell.data.repo.AutoSourceSwitcher
 import com.radium.inkwell.data.repo.BookRepository
 import com.radium.inkwell.data.repo.BookSourceRepository
 import com.radium.inkwell.data.repo.NetBookRepository
 import com.radium.inkwell.data.repo.bookKey
+import com.radium.inkwell.ui.bookshelf.searchableShelfKeys
 import com.radium.inkwell.ui.components.MessageBus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -19,8 +21,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 
 /** 换源候选：书源名称 + 网址 */
 data class SourceOption(val id: String, val name: String)
@@ -91,7 +96,13 @@ class BookPreviewViewModel(
     private val sourceRepo: BookSourceRepository,
     private val netBookRepo: NetBookRepository,
     private val bookRepo: BookRepository,
-) : ViewModel() {
+) : ViewModel(), KoinComponent {
+
+    /**
+     * 只为读「隐藏区上没上锁」这一个开关，从 Koin 现取（同 RssArticleViewModel 取 engine），
+     * 不为它再加一个构造参数。
+     */
+    private val appPrefs: AppPrefs by inject()
 
     /** 当前用的是第几个书源；[ordered] 已按健康度排过，0 就是优先试的那个 */
     private var current = 0
@@ -129,9 +140,10 @@ class BookPreviewViewModel(
 
     init {
         load()
-        // 书架变动时实时刷新"已在书架"（本页刚加、别处加删、跨书源加了同名书都算）
+        // 书架变动时实时刷新"已在书架"（本页刚加、别处加删、跨书源加了同名书都算）。
+        // 隐藏区上了锁时隐藏的书不算 —— 见 searchableShelfKeys
         viewModelScope.launch {
-            bookRepo.shelfKeys.collect { keys ->
+            searchableShelfKeys(bookRepo, appPrefs).collect { keys ->
                 val onShelf = bookKey(_state.value.title, _state.value.author) in keys
                 if (onShelf != _state.value.inShelf) {
                     _state.value = _state.value.copy(inShelf = onShelf)
@@ -230,7 +242,7 @@ class BookPreviewViewModel(
                         chapters = toc,
                         // 按 书名+作者 判断，而不是只认当前书源的 (sourceId,bookUrl)：同一本书跨书源
                         // 合并、代表书源每次搜索可能不同，只认当前源会漏判成"未加入"
-                        inShelf = bookRepo.shelfBookIdByKey(title, author) != null,
+                        inShelf = shelfBookId(title, author) != null,
                         currentSource = current,
                         sources = sourceOptions(),
                     )
@@ -261,7 +273,7 @@ class BookPreviewViewModel(
     fun addToShelf() {
         viewModelScope.launch {
             // 同名书已在架（哪怕是别的书源加的）就别再加一份
-            if (bookRepo.shelfBookIdByKey(_state.value.title, _state.value.author) != null) {
+            if (shelfBookId(_state.value.title, _state.value.author) != null) {
                 _state.value = _state.value.copy(inShelf = true)
                 messages.emit("已在书架")
                 return@launch
@@ -275,7 +287,7 @@ class BookPreviewViewModel(
         viewModelScope.launch {
             val s = _state.value
             // 已在书架（可能是别的书源加的）就直接开那本，不再入库一份重复的
-            val bookId = bookRepo.shelfBookIdByKey(s.title, s.author)
+            val bookId = shelfBookId(s.title, s.author)
                 ?: persistBook(inShelf = false)
                 ?: return@launch
             if (chapterIndex >= 0) {
@@ -285,6 +297,20 @@ class BookPreviewViewModel(
             _openReader.emit(bookId)
         }
     }
+
+    /**
+     * 书架上同名同作者那本的 id。隐藏区上了锁就**不认隐藏的书**（见 [BookRepository.shelfBookIdByKey]）：
+     * 否则「开始阅读」不经验证就把它打开了，「已在书架」也等于替旁人确认它藏在这儿。
+     *
+     * 认不出来就照常试读入库、开一本新的。只有一种情况会落回那本隐藏书：它恰好就是这个书源的
+     * 这个地址（书行 id 由源 + 地址决定）。那一行保持隐藏、也不会被降成试读，书架上不会因此冒出来。
+     */
+    private suspend fun shelfBookId(title: String, author: String?): String? =
+        bookRepo.shelfBookIdByKey(
+            title,
+            author,
+            includeHidden = !appPrefs.hiddenRequireAuth.first(),
+        )
 
     /** 入库；[inShelf] = 正式加架。失败发消息并返回 null */
     private suspend fun persistBook(inShelf: Boolean): String? {

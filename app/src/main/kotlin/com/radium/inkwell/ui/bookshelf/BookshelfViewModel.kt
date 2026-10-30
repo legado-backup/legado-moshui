@@ -23,6 +23,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.job
@@ -70,6 +71,11 @@ class BookshelfViewModel(
      * 最近读过的先刷，有更新时更快看见红点。
      * PullToRefresh 转圈只挂一小会儿 —— 整轮 await 绑死指示器时，架上书一多就像卡死。
      * 后台继续跑，顶栏用 [refreshProgress] 显示「更新中 x/y」。
+     *
+     * 隐藏区收着时，隐藏的书**照刷、但不计数**：放在看得见的书全部刷完、提示发出、进度条收起之后，
+     * 悄悄再刷一轮。不刷的话藏起来的书永远追不上更新（下次进隐藏区红点全是旧的）；计进去的话，
+     * 「更新中 3/5」「2 本书更新了」里多出来的那几本，就是在替旁人数「这儿还藏着几本」。
+     * 隐藏区开着时它们本来就在眼前，和别的书一样计数。
      */
     fun refreshAll() {
         refreshJob?.cancel()
@@ -81,58 +87,47 @@ class BookshelfViewModel(
         val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             val myJob = coroutineContext.job
             try {
-                val books = allBooks.value
+                val showingHidden = _showHidden.value
+                val (books, silent) = allBooks.value
                     .filter { it.type == BookType.NET && !it.sourceId.isNullOrBlank() }
                     .sortedByDescending { maxOf(it.readAt, it.openedAt) }
+                    .partition { showingHidden || !it.hidden }
                 if (books.isEmpty()) {
                     messages.emit("书架上没有网络书")
-                    return@launch
-                }
-                val total = books.size
-                _refreshProgress.value = BookshelfRefreshProgress(
-                    done = 0,
-                    total = total,
-                    running = true,
-                )
-                // 转圈早收起：下拉只是「触发追更」，不是「等到刷完」
-                launch {
-                    delay(REFRESH_INDICATOR_MS)
-                    if (refreshJob === myJob) _refreshing.value = false
-                }
-                val limiter = Semaphore(REFRESH_CONCURRENCY)
-                val done = AtomicInteger(0)
-                val added = books.map { book ->
-                    async {
-                        try {
-                            limiter.withPermit {
-                                val rule = book.sourceId?.let { sourceRepo.getRule(it) }
-                                    ?: return@withPermit 0
-                                // 单本失败/超时不能拖垮整轮 —— 几十本书里总有一两个源在抽风
-                                withTimeoutOrNull(TOC_REFRESH_TIMEOUT_MS) {
-                                    netBookRepo.refreshToc(book, rule).getOrDefault(0)
-                                } ?: 0
-                            }
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (_: Exception) {
-                            0
-                        } finally {
-                            val d = done.incrementAndGet()
-                            if (refreshJob === myJob) {
-                                _refreshProgress.update {
-                                    it.copy(done = d, total = total, running = true)
-                                }
+                } else {
+                    val total = books.size
+                    _refreshProgress.value = BookshelfRefreshProgress(
+                        done = 0,
+                        total = total,
+                        running = true,
+                    )
+                    // 转圈早收起：下拉只是「触发追更」，不是「等到刷完」
+                    launch {
+                        delay(REFRESH_INDICATOR_MS)
+                        if (refreshJob === myJob) _refreshing.value = false
+                    }
+                    val added = refreshTocs(books) { d ->
+                        if (refreshJob === myJob) {
+                            _refreshProgress.update {
+                                it.copy(done = d, total = total, running = true)
                             }
                         }
                     }
-                }.awaitAll()
-
-                val updatedBooks = added.count { it > 0 }
-                val totalChapters = added.sum()
-                messages.emit(
-                    if (updatedBooks == 0) "没有新章节"
-                    else "$updatedBooks 本书更新了，共 $totalChapters 章"
-                )
+                    val updatedBooks = added.count { it > 0 }
+                    val totalChapters = added.sum()
+                    messages.emit(
+                        if (updatedBooks == 0) "没有新章节"
+                        else "$updatedBooks 本书更新了，共 $totalChapters 章"
+                    )
+                }
+                if (silent.isNotEmpty()) {
+                    // 看得见的已经刷完：转圈与「更新中」先收起，隐藏的那几本不再出现在任何计数里
+                    if (refreshJob === myJob) {
+                        _refreshing.value = false
+                        _refreshProgress.value = BookshelfRefreshProgress()
+                    }
+                    refreshTocs(silent)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -147,6 +142,38 @@ class BookshelfViewModel(
         }
         refreshJob = job
         job.start()
+    }
+
+    /**
+     * 并发刷一批书的目录，返回每本新增的章数（失败/超时记 0）。[onDone] 带上已完成的本数，给进度条用。
+     * 限流与超时的理由见 [refreshAll]。
+     */
+    private suspend fun refreshTocs(
+        books: List<BookEntity>,
+        onDone: (Int) -> Unit = {},
+    ): List<Int> = coroutineScope {
+        val limiter = Semaphore(REFRESH_CONCURRENCY)
+        val done = AtomicInteger(0)
+        books.map { book ->
+            async {
+                try {
+                    limiter.withPermit {
+                        val rule = book.sourceId?.let { sourceRepo.getRule(it) }
+                            ?: return@withPermit 0
+                        // 单本失败/超时不能拖垮整轮 —— 几十本书里总有一两个源在抽风
+                        withTimeoutOrNull(TOC_REFRESH_TIMEOUT_MS) {
+                            netBookRepo.refreshToc(book, rule).getOrDefault(0)
+                        } ?: 0
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    0
+                } finally {
+                    onDone(done.incrementAndGet())
+                }
+            }
+        }.awaitAll()
     }
 
     companion object {
@@ -170,15 +197,27 @@ class BookshelfViewModel(
     val layout: StateFlow<BookshelfLayout> = appPrefs.bookshelfLayout
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), BookshelfLayout.GRID)
 
-    val allBooks: StateFlow<List<BookEntity>> = bookRepo.books
+    /**
+     * Room 送来的书架；null = 第一帧还没到。
+     *
+     * [allBooks] 与 [shelfReady] 都从这一份派生，二者同一拍更新。从前 shelfReady 另订一份
+     * `books.map { true }`、allBooks 初值是 emptyList —— 进页那一瞬间「空列表」和「真没有书」分不开，
+     * 书架先闪一下空态和「导入本地书」，书才冒出来。
+     */
+    private val shelf: StateFlow<List<BookEntity>?> = bookRepo.books
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    val allBooks: StateFlow<List<BookEntity>> = shelf
+        .map { it.orEmpty() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /**
      * Room 第一帧已到（含空架）。启动指标用它报 timeToFullDisplay，
      * 而不是首帧空白 —— 书架书是异步来的，TTID 测的不是用户看见的那一帧。
+     * 页面也靠它决定能不能下「书架是空的」这个结论。
      */
-    val shelfReady: StateFlow<Boolean> = bookRepo.books
-        .map { true }
+    val shelfReady: StateFlow<Boolean> = shelf
+        .map { it != null }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val messages = MessageBus()
@@ -190,23 +229,7 @@ class BookshelfViewModel(
     val group: StateFlow<String?> = _group.asStateFlow()
     fun setGroup(g: String?) { _group.value = g }
 
-    val groups: StateFlow<List<String>> = allBooks
-        .map { list ->
-            list.map { it.groupName.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    init {
-        // 正筛着的分组没了（删光了这组的书、或把它们都移去别组）→ 回到「全部」。
-        // 否则 _group 指着一个筛选条上已经不存在的名字：书列表空着、chip 一个也不亮，
-        // 用户只看到「书架突然空了」。
-        viewModelScope.launch {
-            groups.collect { gs ->
-                val g = _group.value
-                if (g != null && g != UNGROUPED && g !in gs) _group.value = null
-            }
-        }
-    }
+    // 分组名列表 [groups] 声明在隐藏区那一节：它要按「隐藏区开没开」过滤，构造期就得取到 _showHidden
 
     // ---- 隐藏 ----
 
@@ -220,6 +243,33 @@ class BookshelfViewModel(
      */
     private val _showHidden = MutableStateFlow(false)
     val showHidden: StateFlow<Boolean> = _showHidden.asStateFlow()
+
+    /**
+     * 筛选条与「设置分组」里列出的分组名。隐藏区收着时**不算隐藏的书**：一个组里只有隐藏的书，
+     * 它的名字就不该作为一个 chip 摆在书架上 —— 点进去是空的，名字本身还泄了底。
+     * 隐藏区开着时那些书就在眼前，它们的组照常列出。
+     */
+    val groups: StateFlow<List<String>> = combine(allBooks, _showHidden) { list, showHidden ->
+        list.asSequence()
+            .filter { showHidden || !it.hidden }
+            .map { it.groupName.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .sorted()
+            .toList()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    init {
+        // 正筛着的分组没了（删光了这组的书、或把它们都移去别组、或收起隐藏区后它只剩隐藏的书）
+        // → 回到「全部」。否则 _group 指着一个筛选条上已经不存在的名字：书列表空着、chip 一个也不亮，
+        // 用户只看到「书架突然空了」。
+        viewModelScope.launch {
+            groups.collect { gs ->
+                val g = _group.value
+                if (g != null && g != UNGROUPED && g !in gs) _group.value = null
+            }
+        }
+    }
 
     /**
      * 「退出 App 就复位」得真的发生。书架是根页面，它的 ViewModel 跟着 Activity 活：

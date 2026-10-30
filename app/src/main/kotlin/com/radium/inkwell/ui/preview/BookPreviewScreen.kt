@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.radium.inkwell.ui.components.ChapterListItem
+import com.radium.inkwell.ui.components.CollectMessages
 import com.radium.inkwell.ui.components.PrimaryButton
 import com.radium.inkwell.core.util.htmlToPlainText
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,9 +61,9 @@ fun BookPreviewScreen(
     val snackbar = remember { SnackbarHostState() }
     var sourcePickerOpen by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        viewModel.messages.messages.collect { snackbar.showSnackbar(it) }
-    }
+    // 走共享的 CollectMessages：新提示直接替换正在显示的那条。从前这里自己 collect + showSnackbar，
+    // showSnackbar 挂到上一条消失才返回 —— 连点「加入」「开始阅读」时提示一条条排队，几秒后才轮到
+    CollectMessages(viewModel.messages, snackbar)
     LaunchedEffect(Unit) {
         viewModel.openReader.collect(onRead)
     }
@@ -162,6 +163,8 @@ private fun Header(
                     height = Dimens.coverDetailHeight,
                 ),
                 placeholderChars = 4,
+                // 书名就在右边，封面不再进读屏
+                contentDescription = null,
             )
             Column(Modifier.padding(start = Dimens.gapL).align(Alignment.CenterVertically)) {
                 Text(state.title, style = MaterialTheme.typography.titleLarge, maxLines = 2)

@@ -24,7 +24,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.unit.dp
 import com.radium.inkwell.ui.components.ContentListDefaults
 import com.radium.inkwell.ui.components.ContentListItem
 import com.radium.inkwell.ui.components.Dimens
@@ -106,10 +105,10 @@ private fun IconRow(icon: AppIcon, selected: Boolean, onClick: () -> Unit) {
                     // 选中的那个描一圈主色。只靠"某一项颜色深一点"是分不出来的
                     .then(
                         if (selected) {
-                            Modifier.border(2.dp, accent, CircleShape)
+                            Modifier.border(Dimens.strokeThick, accent, CircleShape)
                         } else {
                             Modifier.border(
-                                1.dp,
+                                Dimens.strokeThin,
                                 MaterialTheme.colorScheme.outlineVariant,
                                 CircleShape,
                             )

@@ -130,6 +130,30 @@ class InkwellNavigatorTest {
         assertEquals(listOf(BookshelfRoute, BookDetailRoute("b")), s)
     }
 
+    // ---------- 隐藏区收起时关掉隐藏书的详情 ----------
+
+    @Test
+    fun `栈顶是隐藏书的详情时关掉`() {
+        val s = stack(BookshelfRoute, BookDetailRoute("hidden"))
+        s.closeBookDetail(setOf("hidden"))
+        assertEquals(listOf<NavKey>(BookshelfRoute), s)
+    }
+
+    @Test
+    fun `栈顶是普通书的详情时不动`() {
+        val s = stack(BookshelfRoute, BookDetailRoute("visible"))
+        s.closeBookDetail(setOf("hidden"))
+        assertEquals(listOf(BookshelfRoute, BookDetailRoute("visible")), s)
+    }
+
+    /** 详情上又压了阅读页：只看栈顶，不从中间抽走一层（否则返回时直接跨回书架之外） */
+    @Test
+    fun `详情不在栈顶时不动`() {
+        val s = stack(BookshelfRoute, BookDetailRoute("hidden"), ReaderRoute("hidden"))
+        s.closeBookDetail(setOf("hidden"))
+        assertEquals(listOf(BookshelfRoute, BookDetailRoute("hidden"), ReaderRoute("hidden")), s)
+    }
+
     // ---------- 其余页面：栈顶同类替换，防双击叠栈 ----------
 
     @Test

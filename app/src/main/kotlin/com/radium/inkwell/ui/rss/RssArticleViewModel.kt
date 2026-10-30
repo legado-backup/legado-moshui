@@ -6,6 +6,7 @@ import com.radium.inkwell.core.model.ContentElement
 import com.radium.inkwell.core.source.rss.RssArticle
 import com.radium.inkwell.core.source.rss.RssEngine
 import com.radium.inkwell.data.repo.RssRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -88,6 +89,9 @@ class RssArticleViewModel(
                     )
                 }
                 .onFailure {
+                    // 退出页面会取消这次抓取：runCatching 连 CancellationException 一起接住，
+                    // 不放出去的话被取消的协程还会接着往下把「抓取失败」写进状态
+                    if (it is CancellationException) throw it
                     _state.value = _state.value.copy(
                         loading = false,
                         needsBrowser = args.link.isNotBlank(),

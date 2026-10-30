@@ -1,7 +1,5 @@
 package com.radium.inkwell.ui.rss
 
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,9 +14,11 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -26,7 +26,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.radium.inkwell.core.model.ContentElement
 import com.radium.inkwell.ui.components.AppIconButton
+import com.radium.inkwell.ui.components.AppSnackbarHost
 import com.radium.inkwell.ui.components.AppTopBar
+import com.radium.inkwell.ui.components.CollectMessages
+import com.radium.inkwell.ui.components.MessageBus
+import com.radium.inkwell.ui.components.NO_BROWSER_MESSAGE
+import com.radium.inkwell.ui.components.openExternalLink
 import com.radium.inkwell.ui.components.rememberAppTopBarScroll
 import com.radium.inkwell.ui.components.topBarScroll
 import com.radium.inkwell.ui.components.Dimens
@@ -48,12 +53,14 @@ fun RssArticleScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val messages = remember { MessageBus() }
+    val snackbar = remember { SnackbarHostState() }
+    CollectMessages(messages, snackbar)
 
     fun openInBrowser() {
         if (state.link.isBlank()) return
-        runCatching {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(state.link)))
-        }
+        // 从前拉不起浏览器时静默吞掉：按钮点了没反应，用户只会以为没点中
+        if (!context.openExternalLink(state.link)) messages.emit(NO_BROWSER_MESSAGE)
     }
 
     val pageColor = settingsPageColor()
@@ -61,6 +68,7 @@ fun RssArticleScreen(
     Scaffold(
         modifier = Modifier.topBarScroll(topBarScroll),
         containerColor = pageColor,
+        snackbarHost = { AppSnackbarHost(snackbar) },
         topBar = {
             AppTopBar("文章", topBarScroll, onBack = onBack, containerColor = pageColor) {
                 if (state.link.isNotBlank()) {

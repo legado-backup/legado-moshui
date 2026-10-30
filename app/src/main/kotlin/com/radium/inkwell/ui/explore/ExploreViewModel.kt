@@ -10,9 +10,11 @@ import androidx.lifecycle.viewModelScope
 import com.radium.inkwell.core.source.BookSourceEngine
 import com.radium.inkwell.core.source.BookSourceRule
 import com.radium.inkwell.core.source.SearchResult
+import com.radium.inkwell.data.prefs.AppPrefs
 import com.radium.inkwell.data.repo.BookRepository
 import com.radium.inkwell.data.repo.BookSourceRepository
 import com.radium.inkwell.data.repo.NetBookRepository
+import com.radium.inkwell.ui.bookshelf.searchableShelfKeys
 import com.radium.inkwell.ui.components.MessageBus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -20,6 +22,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 
 data class ExploreSource(val id: String, val name: String, val categories: List<String>)
 
@@ -34,6 +38,11 @@ internal fun newExploreItems(current: List<SearchResult>, page: List<SearchResul
 
 data class ExploreUiState(
     val sources: List<ExploreSource> = emptyList(),
+    /**
+     * 书源列表已从库里读过一遍。在这之前 [sources] 的空不代表「没有可用的发现来源」——
+     * 不分开的话，每次进页都先闪一下那个空态（连同「去导入规则」按钮），库读回来才换成内容。
+     */
+    val sourcesLoaded: Boolean = false,
     val sourceIndex: Int = 0,
     val categoryIndex: Int = 0,
     val books: List<SearchResult> = emptyList(),
@@ -56,7 +65,7 @@ data class ExploreUiState(
     val loadMoreFailed: Boolean = false,
     /** 正在加入书架的那几本（bookUrl）。可以同时加好几本 */
     val addingUrls: Set<String> = emptySet(),
-    /** 书架已有书的 (书名,作者) 键；列表据此把已在架的书显示为"已加入" */
+    /** 书架已有书的 (书名,作者) 键；列表据此把已在架的书显示为"已加入"（隐藏区上锁时不含隐藏的书） */
     val shelfKeys: Set<Pair<String, String>> = emptySet(),
 ) {
     val currentSource: ExploreSource? get() = sources.getOrNull(sourceIndex)
@@ -69,7 +78,10 @@ class ExploreViewModel(
     private val netBookRepo: NetBookRepository,
     private val engine: BookSourceEngine,
     private val bookRepo: BookRepository,
-) : ViewModel() {
+) : ViewModel(), KoinComponent {
+
+    /** 只为读「隐藏区上没上锁」这一个开关，同 BookPreviewViewModel 从 Koin 现取 */
+    private val appPrefs: AppPrefs by inject()
 
     private val _state = MutableStateFlow(ExploreUiState())
     val state: StateFlow<ExploreUiState> = _state.asStateFlow()
@@ -80,9 +92,11 @@ class ExploreViewModel(
     private val ruleCache = mutableMapOf<String, BookSourceRule>()
 
     init {
-        // 书架变动时刷新"已加入"标记
+        // 书架变动时刷新"已加入"标记。隐藏区上了锁时隐藏的书不算在架，见 searchableShelfKeys
         viewModelScope.launch {
-            bookRepo.shelfKeys.collect { keys -> _state.value = _state.value.copy(shelfKeys = keys) }
+            searchableShelfKeys(bookRepo, appPrefs).collect { keys ->
+                _state.value = _state.value.copy(shelfKeys = keys)
+            }
         }
         // 书源跟着库走，而不是进页时读一次：从「没有可用的发现源」点「去导入规则」导入回来、
         // 或在书源管理里启停之后，发现页还停在旧的源列表上（甚至一直是空态）。
@@ -106,6 +120,7 @@ class ExploreViewModel(
         val sameView = keep >= 0 && prev.categoryIndex < sources[keep].categories.size
         _state.value = prev.copy(
             sources = sources,
+            sourcesLoaded = true,
             sourceIndex = keep.coerceAtLeast(0),
             categoryIndex = if (sameView) prev.categoryIndex else 0,
         )

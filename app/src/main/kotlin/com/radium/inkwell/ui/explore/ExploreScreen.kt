@@ -124,6 +124,8 @@ fun ExploreScreen(
         snackbarHost = { AppSnackbarHost(snackbar) },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
+            // 库还没读回来：先空着。不能落进下面的空态 —— 那会每次进页都闪一下「没有可用的发现来源」
+            if (!state.sourcesLoaded) return@Column
             if (state.sources.isEmpty()) {
                 EmptyState(
                     icon = Icons.Default.Explore,

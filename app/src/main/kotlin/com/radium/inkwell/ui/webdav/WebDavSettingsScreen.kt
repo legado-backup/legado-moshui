@@ -1,7 +1,6 @@
 package com.radium.inkwell.ui.webdav
 
 import android.content.ClipData
-import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -38,7 +37,6 @@ import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.data.net.OfficialWebDav
 import com.radium.inkwell.data.prefs.WebDavProvider
@@ -49,12 +47,14 @@ import com.radium.inkwell.ui.components.AppTopBar
 import com.radium.inkwell.ui.components.ChipRow
 import com.radium.inkwell.ui.components.CollectMessages
 import com.radium.inkwell.ui.components.Dimens
+import com.radium.inkwell.ui.components.NO_BROWSER_MESSAGE
 import com.radium.inkwell.ui.components.PrimaryButton
 import com.radium.inkwell.ui.components.SecondaryButton
 import com.radium.inkwell.ui.components.SettingGroup
 import com.radium.inkwell.ui.components.SettingGroupPosition
 import com.radium.inkwell.ui.components.SettingRow
 import com.radium.inkwell.ui.components.SwitchRow
+import com.radium.inkwell.ui.components.openExternalLink
 import com.radium.inkwell.ui.components.rememberAppTopBarScroll
 import com.radium.inkwell.ui.components.settingsPageColor
 import com.radium.inkwell.ui.components.topBarScroll
@@ -203,7 +203,9 @@ private fun OfficialConnected(state: WebDavUiState, viewModel: WebDavViewModel) 
         SettingRow(
             title = "在网页管理账号",
             onClick = {
-                context.startActivity(Intent(Intent.ACTION_VIEW, OfficialWebDav.SITE.toUri()))
+                if (!context.openExternalLink(OfficialWebDav.SITE)) {
+                    viewModel.messages.emit(NO_BROWSER_MESSAGE)
+                }
             },
             position = SettingGroupPosition.Middle,
         )

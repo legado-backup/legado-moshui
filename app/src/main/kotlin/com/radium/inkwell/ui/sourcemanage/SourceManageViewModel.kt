@@ -339,15 +339,32 @@ class SourceManageViewModel(
             }.onSuccess { file ->
                 _exportFile.emit(file)
                 clearSelection()
-            }.onFailure { messages.emit("导出失败: ${it.message?.take(60)}") }
+            }.onFailure {
+                // 退出页面会取消导出：runCatching 连取消一起接住，不放出去就会弹一条假的「导出失败」
+                if (it is CancellationException) throw it
+                messages.emit("导出失败: ${it.message?.take(60)}")
+            }
         }
     }
 
     private val _exportFile = kotlinx.coroutines.flow.MutableSharedFlow<java.io.File>(extraBufferCapacity = 1)
     val exportFile = _exportFile
 
-    val sources: StateFlow<List<BookSourceListItem>> = sourceRepo.sources
+    /**
+     * Room 送来的书源列表；null = 第一帧还没到。[sources] 与 [sourcesLoaded] 都从它派生、同一拍更新。
+     * 页面靠 sourcesLoaded 才能下「还没有书源」这个结论 —— 拿 emptyList 当初值的话，
+     * 每次进页都先闪一下空态和「从文件导入」。
+     */
+    private val loadedSources: StateFlow<List<BookSourceListItem>?> = sourceRepo.sources
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val sources: StateFlow<List<BookSourceListItem>> = loadedSources
+        .map { it.orEmpty() }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val sourcesLoaded: StateFlow<Boolean> = loadedSources
+        .map { it != null }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     // ---- 搜索 / 筛选 / 排序 / 分组 ----
 
@@ -378,6 +395,18 @@ class SourceManageViewModel(
                 .sorted()
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    init {
+        // 正筛着的分组没了（这组的书源全删了、或全移去别组 / 移出分组）→ 回到不按分组筛（同书架）。
+        // 否则 _group 指着一个已不存在的名字：列表空着，而分组 chip 只在「有分组」时才画 ——
+        // 最后一个组没了，chip 跟着消失，用户连取消这个筛选的入口都没有，只看到一片空白。
+        viewModelScope.launch {
+            groups.collect { gs ->
+                val g = _group.value
+                if (g != null && g !in gs) _group.value = null
+            }
+        }
+    }
 
     /**
      * 无搜索规则（仅发现页可用）的书源 id。
@@ -467,7 +496,11 @@ class SourceManageViewModel(
                 }
             }
             text.onSuccess { importText(it) }
-                .onFailure { messages.emit("读取失败: ${it.message}") }
+                .onFailure {
+                    // 离开页面会取消这次读取：取消不是「读取失败」，放出去，别弹假提示
+                    if (it is CancellationException) throw it
+                    messages.emit("读取失败: ${it.message}")
+                }
         }
     }
 
@@ -485,7 +518,11 @@ class SourceManageViewModel(
                 }
             }
             text.onSuccess { importText(it) }
-                .onFailure { messages.emit("下载失败: ${it.message}") }
+                .onFailure {
+                    // 同上：取消不是「下载失败」
+                    if (it is CancellationException) throw it
+                    messages.emit("下载失败: ${it.message}")
+                }
         }
     }
 

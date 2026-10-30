@@ -12,7 +12,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -20,10 +19,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.data.prefs.AppPrefs
 import com.radium.inkwell.ui.bookshelf.BookshelfLayout
 import com.radium.inkwell.ui.components.AppSnackbarHost
 import com.radium.inkwell.ui.components.AppTopBar
+import com.radium.inkwell.ui.components.CollectMessages
+import com.radium.inkwell.ui.components.MessageBus
 import com.radium.inkwell.ui.components.rememberAppTopBarScroll
 import com.radium.inkwell.ui.components.topBarScroll
 import com.radium.inkwell.ui.components.Dimens
@@ -48,8 +50,13 @@ fun AppearanceSettingsScreen(
     val appPrefs = koinInject<AppPrefs>()
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    val exploreEnabled by appPrefs.exploreEnabled.collectAsState(initial = true)
-    val bookshelfLayout by appPrefs.bookshelfLayout.collectAsState(initial = BookshelfLayout.GRID)
+    // 提示走 MessageBus：新提示替换正在显示的那条，而不是排在它后面等 4 秒
+    val messages = remember { MessageBus() }
+    CollectMessages(messages, snackbar)
+    val exploreEnabled by appPrefs.exploreEnabled.collectAsStateWithLifecycle(initialValue = true)
+    val bookshelfLayout by appPrefs.bookshelfLayout.collectAsStateWithLifecycle(
+        initialValue = BookshelfLayout.GRID,
+    )
     var appIcon by remember { mutableStateOf(AppIconManager.current(context)) }
     var showIconPicker by remember { mutableStateOf(false) }
     var showLayoutPicker by remember { mutableStateOf(false) }
@@ -132,9 +139,7 @@ fun AppearanceSettingsScreen(
                 if (picked != appIcon) {
                     AppIconManager.apply(context, picked)
                     appIcon = picked
-                    scope.launch {
-                        snackbar.showSnackbar("已换成「${picked.label}」，桌面图标稍后刷新")
-                    }
+                    messages.emit("已换成「${picked.label}」，桌面图标稍后刷新")
                 }
             },
             onDismiss = { showIconPicker = false },

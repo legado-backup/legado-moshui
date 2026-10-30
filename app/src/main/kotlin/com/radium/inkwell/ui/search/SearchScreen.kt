@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import com.radium.inkwell.ui.components.AppIconButton
@@ -171,11 +172,21 @@ fun SearchScreen(
                 }
             }
             if (state.results.isEmpty() && !state.searching && !state.searchPaused) {
-                EmptyState(
-                    icon = Icons.Default.Search,
-                    title = "按已启用的规则搜索",
-                    hint = "输入书名或作者；未导入规则时无结果",
-                )
+                if (state.searchId > 0) {
+                    // 搜完了一本没有。从前这里落回进页时那句「按已启用的规则搜索」，
+                    // 看起来像什么都没发生 —— 用户分不清是没搜、还是搜了没有。
+                    EmptyState(
+                        icon = Icons.Default.SearchOff,
+                        title = "没有找到相关的书",
+                        hint = "换个关键词试试，或到书源管理里检查书源是否已启用、是否还能用",
+                    )
+                } else {
+                    EmptyState(
+                        icon = Icons.Default.Search,
+                        title = "按已启用的规则搜索",
+                        hint = "输入书名或作者；未导入规则时无结果",
+                    )
+                }
             } else {
                 // 列表上方一条：左侧数量、右侧当前排序。不塞进顶栏 ——
                 // 顶栏已经是搜索框 + 搜索按钮，再加排序图标会挤成一团。
@@ -192,7 +203,9 @@ fun SearchScreen(
                     contentPadding = ContentListDefaults.listContentPadding(),
                     verticalArrangement = Arrangement.spacedBy(ContentListDefaults.ListSpacing),
                 ) {
-                    items(state.results, key = { "${it.result.sourceId}|${it.result.bookUrl}" }) { hit ->
+                    // key 必须与合并键是同一个（SearchHit.key）：拿代表条目的 sourceId|bookUrl 当 key 的话，
+                    // 一个书源把同一地址列成两本书就撞 key 崩溃，见 searchKey
+                    items(state.results, key = { it.key }) { hit ->
                         val result = hit.result
                         val inShelf = bookKey(result.title, result.author) in state.shelfKeys
                         BookListRow(
@@ -264,6 +277,10 @@ fun SearchScreen(
 /**
  * 搜索结果工具条：左数量、右排序入口。整行高度贴 [Dimens.touchTarget]，
  * 点排序一侧打开底部面板（与书源管理同一套 OptionPicker）。
+ *
+ * 可点的是排序那一小块，它自己就得够 48dp 高：从前靠上下各 [Dimens.gapS] 撑，
+ * 18dp 图标 / 一行 labelLarge 撑出来只有 36dp 左右，手指按偏一点就落空。
+ * 外层不再另加上下留白 —— 加了就是 56dp，比两侧内容都高出一截。
  */
 @Composable
 private fun SearchSortBar(
@@ -275,7 +292,7 @@ private fun SearchSortBar(
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = Dimens.listHorizontal, vertical = Dimens.gapXS),
+            .padding(horizontal = Dimens.listHorizontal),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -287,7 +304,8 @@ private fun SearchSortBar(
         Row(
             Modifier
                 .clickable(role = Role.Button, onClick = onOpenSort)
-                .padding(vertical = Dimens.gapS, horizontal = Dimens.gapXS),
+                .heightIn(min = Dimens.touchTarget)
+                .padding(horizontal = Dimens.gapXS),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
@@ -317,7 +335,7 @@ private fun SearchPauseBar(onResume: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = Dimens.listHorizontal, vertical = Dimens.gapXS),
+            .padding(horizontal = Dimens.listHorizontal),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(

@@ -109,6 +109,8 @@ private fun ArticleRow(article: RssArticle, onClick: () -> Unit) {
                         height = Dimens.coverThumbHeight,
                     ),
                     placeholderChars = 2,
+                    // 文章标题是这一行的标题，配图不再进读屏
+                    contentDescription = null,
                 )
             }
         },

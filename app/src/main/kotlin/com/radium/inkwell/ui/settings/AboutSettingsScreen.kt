@@ -1,7 +1,5 @@
 package com.radium.inkwell.ui.settings
 
-import android.content.Intent
-import android.net.Uri
 import android.os.SystemClock
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -15,7 +13,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -24,11 +21,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.data.prefs.AppPrefs
 import com.radium.inkwell.ui.components.AppSnackbarHost
 import com.radium.inkwell.ui.components.AppTopBar
 import com.radium.inkwell.ui.components.CollectMessages
 import com.radium.inkwell.ui.components.MessageBus
+import com.radium.inkwell.ui.components.NO_BROWSER_MESSAGE
+import com.radium.inkwell.ui.components.openExternalLink
 import com.radium.inkwell.ui.components.rememberAppTopBarScroll
 import com.radium.inkwell.ui.components.topBarScroll
 import com.radium.inkwell.ui.components.Dimens
@@ -60,7 +60,7 @@ fun AboutSettingsScreen(
     val context = LocalContext.current
     val appPrefs = koinInject<AppPrefs>()
     val scope = rememberCoroutineScope()
-    val developerMode by appPrefs.developerMode.collectAsState(initial = false)
+    val developerMode by appPrefs.developerMode.collectAsStateWithLifecycle(initialValue = false)
     val messages = remember { MessageBus() }
     val snackbar = remember { SnackbarHostState() }
     CollectMessages(messages, snackbar)
@@ -140,7 +140,7 @@ fun AboutSettingsScreen(
                     title = "官网（web）",
                     value = SITE_URL,
                     onClick = {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(SITE_URL)))
+                        if (!context.openExternalLink(SITE_URL)) messages.emit(NO_BROWSER_MESSAGE)
                     },
                     position = SettingGroupPosition.Middle,
                 )
@@ -148,7 +148,9 @@ fun AboutSettingsScreen(
                     title = "开源地址",
                     value = UpdateChecker.REPO_URL,
                     onClick = {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(UpdateChecker.REPO_URL)))
+                        if (!context.openExternalLink(UpdateChecker.REPO_URL)) {
+                            messages.emit(NO_BROWSER_MESSAGE)
+                        }
                     },
                     position = SettingGroupPosition.Last,
                 )

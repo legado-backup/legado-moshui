@@ -1,7 +1,6 @@
 package com.radium.inkwell.ui.feedback
 
-import android.content.Intent
-import androidx.core.net.toUri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,13 +22,16 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radium.inkwell.data.repo.FeedbackRepository
+import com.radium.inkwell.ui.components.AppAlertDialog
 import com.radium.inkwell.ui.components.AppSnackbarHost
 import com.radium.inkwell.ui.components.AppTopBar
 import com.radium.inkwell.ui.components.rememberAppTopBarScroll
@@ -38,8 +40,10 @@ import com.radium.inkwell.ui.components.CollectMessages
 import com.radium.inkwell.ui.components.CompactTextArea
 import com.radium.inkwell.ui.components.CompactTextField
 import com.radium.inkwell.ui.components.Dimens
+import com.radium.inkwell.ui.components.NO_BROWSER_MESSAGE
 import com.radium.inkwell.ui.components.PrimaryButton
 import com.radium.inkwell.ui.components.SecondaryButton
+import com.radium.inkwell.ui.components.openExternalLink
 import com.radium.inkwell.ui.components.settingsPageColor
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -54,19 +58,31 @@ fun FeedbackScreen(
 
     CollectMessages(viewModel.messages, snackbar)
 
+    // 写了一半就走：系统返回、顶栏返回都先问一句。反馈常常是一大段复现步骤，
+    // 手一滑划回去就全没了，而这页不存草稿。没写东西、或已经提交成功时照常直接退。
+    val hasDraft = state.successUrl == null &&
+        (state.content.isNotBlank() || state.contact.isNotBlank())
+    var confirmLeave by remember { mutableStateOf(false) }
+    BackHandler(enabled = hasDraft) { confirmLeave = true }
+    val leave: () -> Unit = {
+        if (hasDraft) confirmLeave = true else onBack()
+    }
+
     val pageColor = settingsPageColor()
     val topBarScroll = rememberAppTopBarScroll()
     Scaffold(
         modifier = Modifier.topBarScroll(topBarScroll),
         containerColor = pageColor,
-        topBar = { AppTopBar("意见反馈", topBarScroll, onBack = onBack, containerColor = pageColor) },
+        topBar = { AppTopBar("意见反馈", topBarScroll, onBack = leave, containerColor = pageColor) },
         snackbarHost = { AppSnackbarHost(snackbar) },
     ) { padding ->
         val url = state.successUrl
         if (url != null) {
             SubmittedState(
                 url = url,
-                onView = { context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri())) },
+                onView = {
+                    if (!context.openExternalLink(url)) viewModel.messages.emit(NO_BROWSER_MESSAGE)
+                },
                 onBack = onBack,
                 modifier = Modifier.fillMaxSize().padding(padding).padding(Dimens.screenPadding),
             )
@@ -142,6 +158,20 @@ fun FeedbackScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+
+    if (confirmLeave) {
+        AppAlertDialog(
+            onDismissRequest = { confirmLeave = false },
+            title = "放弃编辑？",
+            text = "写好的反馈还没提交，离开后不会保留。",
+            confirmText = "放弃",
+            dismissText = "继续编辑",
+            onConfirm = {
+                confirmLeave = false
+                onBack()
+            },
+        )
     }
 }
 
