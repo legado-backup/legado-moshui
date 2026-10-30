@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Baseline Profile 夹具开关（见 ProfileSeed.kt）。默认关：正式包、调试包都不认启动 extra 导书。
+  只有 baselineprofile 插件生成的 nonMinifiedRelease / benchmarkRelease 变体由 app/build.gradle.kts
+  的 androidComponents 块用 resValue 盖成 true —— 生成器正是装这两个变体去跑的。
+-->
+<resources>
+    <bool name="profile_seed_enabled">false</bool>
+</resources>

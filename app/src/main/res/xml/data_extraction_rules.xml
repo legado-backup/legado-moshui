@@ -12,12 +12,28 @@
   解出来是空串，地址和账号却还在：界面显示已配置 / 官方已连接，每次自动同步都静默 401。
   device_id 也在这个文件里，被克隆过去后两台设备的应用码同名，新机一重新登录就会把旧机的码
   作废（0.3.8 修的就是这件事）。所以迁移也排掉：新手机上重新填一次 / 重新登录一次。
+
+  cloud-backup 还要排掉 filesDir 里的大块头。Auto Backup 每个应用只有 25 MB 配额，**超了不是少备一点，
+  而是整次备份直接跳过** —— 书库数据库、阅读进度、书源这些真正要保住的东西也就一起没了。
+  从前只排了上面那一个文件，正文缓存一攒就远超 25 MB，云备份实际上从来没成功过。
+    - cache/   正文缓存（ChapterContentCache）：几千章就是几十上百 MB，联网随时能重新抓。
+    - covers/  本地书的封面：从书文件里抽出来的，重新导入时会再抽一次。
+    - logs/    开发者模式的运行日志：只对这台设备当时的问题有意义。
+    - books/   导入的书文件：一本带插图的 epub 就能吃掉大半配额，几本下来必超。恢复后书行还在，
+               只是文件不在 —— 和 WebDAV 同步来的本地书一样，在书架重新导入同一个文件就补上
+               （BookRepository 认「有书行、没文件」的占位，沿用原来的进度/分组）。
+  device-transfer 没有配额，换机时用户要的正是原样搬家：书文件、封面、正文缓存照带，只排日志。
 -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="file" path="datastore/webdav.preferences_pb" />
+        <exclude domain="file" path="cache/" />
+        <exclude domain="file" path="covers/" />
+        <exclude domain="file" path="logs/" />
+        <exclude domain="file" path="books/" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="datastore/webdav.preferences_pb" />
+        <exclude domain="file" path="logs/" />
     </device-transfer>
 </data-extraction-rules>

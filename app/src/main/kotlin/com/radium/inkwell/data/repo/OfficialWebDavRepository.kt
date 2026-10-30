@@ -74,19 +74,29 @@ class OfficialWebDavRepository(
     }
 
     suspend fun disconnect() {
-        val config = prefs.config.first()
-        if (config.officialAccessToken.isNotBlank() || config.officialRefreshToken.isNotBlank()) {
-            api.logout(config.officialAccessToken, config.officialRefreshToken)
-        }
-        prefs.disconnectOfficial()
+        logoutThen { prefs.disconnectOfficial() }
     }
 
     suspend fun switchToCustomKeepingDav() {
+        logoutThen { prefs.switchToCustomKeepingDav() }
+    }
+
+    /**
+     * 先请服务端注销会话，再清本地凭据 —— 后一步**无论如何都要做**。
+     *
+     * 用户在注销请求的当口离开页面（协程取消）时，服务端可能已经把会话作废了，本地却还留着令牌：
+     * 界面显示「官方已连接」，刷新令牌一用就 401。所以本地这一步放在 finally 里、且不可取消；
+     * 取消本身照常往外抛。
+     */
+    private suspend fun logoutThen(clearLocal: suspend () -> Unit) {
         val config = prefs.config.first()
-        if (config.officialAccessToken.isNotBlank() || config.officialRefreshToken.isNotBlank()) {
-            api.logout(config.officialAccessToken, config.officialRefreshToken)
+        try {
+            if (config.officialAccessToken.isNotBlank() || config.officialRefreshToken.isNotBlank()) {
+                api.logout(config.officialAccessToken, config.officialRefreshToken)
+            }
+        } finally {
+            withContext(NonCancellable) { clearLocal() }
         }
-        prefs.switchToCustomKeepingDav()
     }
 
     private suspend fun provision(auth: suspend () -> OfficialAuthData): Result<Unit> {

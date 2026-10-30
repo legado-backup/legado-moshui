@@ -14,7 +14,9 @@ import com.radium.inkwell.data.db.dao.ReplaceRuleDao
 import com.radium.inkwell.data.db.entity.BookEntity
 import com.radium.inkwell.data.db.entity.BookType
 import com.radium.inkwell.data.db.entity.ChapterEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
@@ -92,26 +94,20 @@ class BookRepository(
      * 同一文件选两遍书架上就会出现两本一模一样的。
      */
     suspend fun importLocalBook(uri: Uri): Result<LocalImportResult> = withContext(Dispatchers.IO) {
-        runCatching {
+        try {
             val displayName = queryDisplayName(uri) ?: "book_${System.currentTimeMillis()}.txt"
-            val bookId = UUID.randomUUID().toString()
-            val ext = displayName.substringAfterLast('.', "txt").lowercase()
-            val dest = File(booksDir(), "$bookId.$ext")
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { input.copyTo(it) }
-            } ?: error("无法读取所选文件")
-
-            try {
-                insertCopiedLocal(dest, displayName, bookId, ext)
-            } catch (e: Exception) {
-                // 书行可能已插入、章节写失败 —— 回滚掉，别留一条指向已删文件的幽灵书
-                dest.delete()
-                // 这是**导入失败的回滚**，不是用户删书：这行从没成功存在过，
-                // 必须真删。留墓碑会把一条凭空的「删除」同步给其它设备。
-                bookDao.hardDelete(bookId)
-                chapterDao.deleteByBook(bookId)
-                throw e
-            }
+            Result.success(
+                importCopy(displayName) { dest ->
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        dest.outputStream().use { input.copyTo(it) }
+                    } ?: error("无法读取所选文件")
+                }
+            )
+        } catch (e: CancellationException) {
+            // 用户离开导入页 —— 这是取消，不是「导入失败」
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
@@ -120,21 +116,45 @@ class BookRepository(
      */
     suspend fun importLocalFile(file: File, displayName: String = file.name): Result<LocalImportResult> =
         withContext(Dispatchers.IO) {
-            runCatching {
-                val bookId = UUID.randomUUID().toString()
-                val ext = displayName.substringAfterLast('.', "txt").lowercase()
-                val dest = File(booksDir(), "$bookId.$ext")
-                file.copyTo(dest, overwrite = true)
-                try {
-                    insertCopiedLocal(dest, displayName, bookId, ext)
-                } catch (e: Exception) {
-                    dest.delete()
-                    bookDao.hardDelete(bookId)
-                    chapterDao.deleteByBook(bookId)
-                    throw e
-                }
+            try {
+                Result.success(importCopy(displayName) { dest -> file.copyTo(dest, overwrite = true) })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
             }
         }
+
+    /**
+     * 复制进私有目录 → 解析 → 入库。中途任何一步失败（含取消）都回滚这次复制出来的书文件和封面 ——
+     * 从前复制失败留半截文件、封面在哪条失败路径上都没删过，books/ covers/ 里越攒越多没人认领的文件。
+     */
+    private suspend fun importCopy(displayName: String, copy: (File) -> Unit): LocalImportResult {
+        val bookId = UUID.randomUUID().toString()
+        val ext = displayName.substringAfterLast('.', "txt").lowercase()
+        val dest = File(booksDir(), "$bookId.$ext")
+        try {
+            copy(dest)
+            return insertCopiedLocal(dest, displayName, bookId, ext)
+        } catch (e: Exception) {
+            // 回滚本身要写库，取消之后的挂起调用会直接抛 —— 不顶住的话一样什么都没清
+            withContext(NonCancellable) { rollbackImport(dest, bookId) }
+            throw e
+        }
+    }
+
+    private suspend fun rollbackImport(dest: File, bookId: String) {
+        // 事务**提交之后**才被取消（写事务返回时会补查一次取消）：书行已经指向这个文件，这次导入其实成了。
+        // 从前一律当失败回滚，删掉的是一本已经在书架上的书的文件 —— 留下一条点开就报错的幽灵书。
+        if (bookDao.countByLocalPath(dest.absolutePath) > 0) return
+        dest.delete()
+        // 封面在入库事务之前就落了盘，失败了也得跟着删（补占位那条路径同样用新 id 起名）
+        File(coversDir(), "$bookId.img").delete()
+        // 这是**导入失败的回滚**，不是用户删书：这行从没成功存在过，
+        // 必须真删。留墓碑会把一条凭空的「删除」同步给其它设备。
+        bookDao.hardDelete(bookId)
+        chapterDao.deleteByBook(bookId)
+    }
 
     private suspend fun insertCopiedLocal(
         dest: File,
@@ -298,12 +318,14 @@ class BookRepository(
 
     /** 打开本地书文件（调用方负责 close） */
     fun openLocal(book: BookEntity): BookHandle {
-        val path = book.localPath ?: error(
+        // 有路径、文件却不在，和没有路径是一回事：从云备份恢复的书行带着原来的路径，
+        // 书文件本身不进 Auto Backup（见 res/xml/data_extraction_rules.xml）。不拦的话报的是一串文件路径
+        val file = book.localPath?.let(::File)?.takeIf { it.isFile } ?: error(
             if (book.type == BookType.NET) "非本地书籍"
             // 同步只带书架信息、不带文件：别的设备导入的书在这台设备上只是一条占位
             else "这本书的文件不在这台设备上，请在书架重新导入同一个文件",
         )
-        return parserRegistry.open(File(path))
+        return parserRegistry.open(file)
     }
 
     private fun queryDisplayName(uri: Uri): String? =

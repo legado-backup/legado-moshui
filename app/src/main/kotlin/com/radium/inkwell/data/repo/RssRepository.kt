@@ -8,6 +8,7 @@ import com.radium.inkwell.core.source.rss.RssSourceRule
 import com.radium.inkwell.core.source.rss.RssXmlParser
 import com.radium.inkwell.data.db.dao.RssSourceDao
 import com.radium.inkwell.data.db.entity.RssSourceEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 
 /** 导入结果；与书源导入同样的口径：说清新增了几个、跳过了几个、为什么 */
@@ -82,8 +83,13 @@ class RssRepository(
 
     /** 一个裸 feed 地址 → 一个订阅源。名字取 feed 自己的标题，取不到就用域名 */
     private suspend fun importPlainFeed(url: String): RssImportReport {
-        val fetched = runCatching { http.fetch(url) }.getOrElse {
-            return RssImportReport(0, 0, listOf("$url: 打不开（${it.message?.take(40)}）"))
+        val fetched = try {
+            http.fetch(url)
+        } catch (e: CancellationException) {
+            // 用户离开页面是取消：吞掉的话会接着往下写库，还报一句「打不开」
+            throw e
+        } catch (e: Exception) {
+            return RssImportReport(0, 0, listOf("$url: 打不开（${e.message?.take(40)}）"))
         }
         val title = RssXmlParser.feedTitle(fetched.bodyText)
             ?: url.substringAfter("://").substringBefore("/")

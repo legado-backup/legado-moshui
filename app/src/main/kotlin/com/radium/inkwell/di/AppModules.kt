@@ -112,7 +112,12 @@ val appModule = module {
     single { com.radium.inkwell.update.UpdateChecker(get()) }
     single { com.radium.inkwell.update.ServerUpdateChecker(get()) }
     single { com.radium.inkwell.data.repo.FeedbackRepository(get()) }
-    single { com.radium.inkwell.update.UpdateInstaller(get()) }
+    single {
+        com.radium.inkwell.update.UpdateInstaller(
+            get(),
+            com.radium.inkwell.update.InstalledAppAuthenticity(androidContext()),
+        )
+    }
     single { com.radium.inkwell.update.UpdateManager(get(), get(), get()) }
 
     single { BookRepository(androidContext(), get(), get(), get(), get(), get(), get(), get()) }

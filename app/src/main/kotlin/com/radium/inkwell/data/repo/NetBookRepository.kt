@@ -190,7 +190,17 @@ class NetBookRepository(
         db.withWriteTransaction {
             // 网络往返可能长达数分钟，其间用户可能已经进书读了几页、删了书、改了分组。
             // 用传入的旧快照整行 copy 会把这些变化抹掉 —— 所有网络都走完之后、在写事务里重读一次为准。
-            val fresh = bookDao.getById(book.id) ?: book
+            val fresh = bookDao.getById(book.id)
+            // 这趟抓的是**快照那一刻的书源**的目录。书架追更是拿一份快照列表在后台慢慢跑的，
+            // 这期间手动/自动换源、或 WebDAV 同步来别处的换源都可能先落了库：再把旧源的章节 URL、
+            // 按旧目录对齐的进度写到新源的书行上，正文必然抓不出来 → 触发自动换源 → 又换一个源，来回乒乓。
+            // 行没了（试读被丢弃）也一样：写下去就是一套没有书行的孤儿目录。
+            // 身份变了就整趟作废，当成「没有新章节」—— 新源的目录由换源那条路径自己负责。
+            if (fresh == null || fresh.deleted ||
+                fresh.sourceId != book.sourceId || fresh.bookUrl != book.bookUrl || fresh.tocUrl != book.tocUrl
+            ) {
+                return@withWriteTransaction
+            }
             // 追更同样要对齐进度：站点在前面插入公告章/防盗章后目录整体后移，沿用旧序号会直接跳章
             // （从前只有换源做了对齐，追更没做）。对齐要读旧目录，必须在 replaceToc 之前
             val (readIndex, readOffset) = alignProgress(fresh.id, fresh, toc)
@@ -302,23 +312,26 @@ class NetBookRepository(
     ): Result<Unit> = try {
         val (detail, toc) = fetchDetailAndToc(newRule, newResult.bookUrl)
         check(toc.isNotEmpty()) { "新书源目录为空" }
-        // 网络往返期间用户可能已翻了很多页，进度早不是传入快照那一刻的了。写库前重读最新行，
-        // 既让 alignProgress 按**当前**章节标题对齐（否则换源后跳回进书时的章节），
-        // 也避免整行 copy 把 readAt/红点/分组等抹回旧值。
-        val fresh = bookDao.getById(book.id) ?: book
-        val (newIndex, newOffset) = restore
-            ?.let { it.chapterIndex.coerceIn(0, toc.lastIndex) to it.charOffset }
-            ?: alignProgress(
-                fresh.id,
-                alignFrom?.let { fresh.copy(readChapterIndex = it.chapterIndex, readCharOffset = it.charOffset) }
-                    ?: fresh,
-                toc,
-            ).let { it.first to 0 }
 
         withContext(Dispatchers.IO) { cache.clear(book.id) } // 旧源的正文缓存整本作废（成千个文件）
         val entities = buildToc(book.id, toc)
         db.withWriteTransaction {
+            // 网络往返期间用户可能已翻了很多页，进度早不是传入快照那一刻的了。在写事务里重读最新行，
+            // 既让 alignProgress 按**当前**章节标题对齐（否则换源后跳回进书时的章节），
+            // 也避免整行 copy 把 readAt/红点/分组等抹回旧值。从前是在清缓存、算目录**之前**读的 ——
+            // 那两步是成千次文件 IO，期间落库的进度/同步照样会被盖掉。
+            // 行没了（试读在这期间被丢弃）就别写：给不存在的书写一套目录只会留下孤儿行。
+            val fresh = bookDao.getById(book.id) ?: error("这本书已不在库里")
+            val (newIndex, newOffset) = restore
+                ?.let { it.chapterIndex.coerceIn(0, toc.lastIndex) to it.charOffset }
+                ?: alignProgress(
+                    fresh.id,
+                    alignFrom?.let { fresh.copy(readChapterIndex = it.chapterIndex, readCharOffset = it.charOffset) }
+                        ?: fresh,
+                    toc,
+                ).let { it.first to 0 }
             replaceToc(book.id, entities)
+            val now = System.currentTimeMillis()
             bookDao.update(
                 fresh.copy(
                     sourceId = newRule.id,
@@ -328,7 +341,13 @@ class NetBookRepository(
                     latestChapterTitle = toc.lastOrNull()?.title,
                     readChapterIndex = newIndex,
                     readCharOffset = newOffset,
-                    updatedAt = System.currentTimeMillis(),
+                    // 章号只在它所属的那个源里有意义：换源把进度换算进了新目录的坐标系，这本身就是一次
+                    // 进度变动，readAt 必须跟着盖新。从前不盖：另一台设备同步时，书源按 updatedAt 取了这边的
+                    // 新源，进度却因 readAt 打平留在它自己那份**旧源**的章号上 —— 新源前面多几章公告，
+                    // 它就落后几章，还会把这个错位的进度再推回来。WebDAV 合并把「书源 + 进度」当成一个整体
+                    // 按 readAt 裁决（见 BackupMerger.mergeBook），这里盖了新时间戳，换源才能连同进度一起赢。
+                    readAt = now,
+                    updatedAt = now,
                 )
             )
         }

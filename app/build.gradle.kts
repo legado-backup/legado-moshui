@@ -66,6 +66,24 @@ kotlin {
     jvmToolchain(21)
 }
 
+// Baseline Profile 夹具（ProfileSeed）只在生成器跑的那两个变体里开。
+// MainActivity 认启动 extra 导入一本「Benchmark」txt；而桌面 alias 是 exported 的，任何应用都能带着
+// 这个 extra 拉起我们 —— 正式包里放着它，就是谁都能往用户书架上塞一本书，再经 WebDAV 扩散到所有设备。
+// 不能按 debuggable 判：baselineprofile 插件生成的 nonMinifiedRelease / benchmarkRelease 都不可调试，
+// 按它关掉，profile 就生成不出来了。默认值 false 在 res/values/profile_seed.xml。
+androidComponents {
+    // AGP 9 起 resValues 默认关闭，关着时下面的 put 只换来一句警告、什么都不生成
+    finalizeDsl { android -> android.buildFeatures.resValues = true }
+    onVariants { variant ->
+        if (variant.buildType == "nonMinifiedRelease" || variant.buildType == "benchmarkRelease") {
+            variant.resValues.put(
+                variant.makeResValueKey("bool", "profile_seed_enabled"),
+                com.android.build.api.variant.ResValue("true", "Baseline Profile 生成器专用变体"),
+            )
+        }
+    }
+}
+
 // Compose 编译器指标：哪些 composable 不可跳过（non-skippable）、哪些入参类型不稳定。
 // 默认关闭 —— 开着会给每次编译多写一批报告文件，平时不需要。要看时：
 //   ./gradlew :app:assembleRelease -PcomposeMetrics

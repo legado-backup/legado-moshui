@@ -4,6 +4,8 @@ import com.radium.inkwell.data.db.entity.CheckStatus
 import com.radium.inkwell.core.source.BookSourceEngine
 import com.radium.inkwell.core.source.BookSourceRule
 import com.radium.inkwell.core.source.SearchResult
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -54,13 +56,20 @@ class AutoSourceSwitcher(
 
         val jobs = candidates.map { rule ->
             launch {
-                val probe = runCatching {
+                val probe = try {
                     limiter.withPermit {
                         withTimeout(PROBE_TIMEOUT_MS) {
                             probe(rule, title, author, target, checkAuthor)
                         }
                     }
-                }.getOrNull()
+                } catch (e: TimeoutCancellationException) {
+                    null // 这一个源超时 = 这个源不行，不是整轮被取消
+                } catch (e: CancellationException) {
+                    // 别的源已先跑通、或整轮被调用方取消：照常收尾，别装成「这个源不行」再往 inbox 里报
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
                 inbox.send(probe)
             }
         }
@@ -86,7 +95,7 @@ class AutoSourceSwitcher(
         bookHits: Map<String, Boolean>,
     ): List<BookSourceRule> = rank(sourceRepo.getEnabledForSwitch(), exclude, bookHits)
 
-    /** 端到端跑一遍。任何一环没过就返回 null —— 抛异常也一样，调用方 runCatching 吞掉。 */
+    /** 端到端跑一遍。任何一环没过就返回 null —— 抛异常也一样，调用方按「这个源不行」吞掉（取消除外）。 */
     private suspend fun probe(
         rule: BookSourceRule,
         title: String,

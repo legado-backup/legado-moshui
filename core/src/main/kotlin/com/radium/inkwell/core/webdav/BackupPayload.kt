@@ -153,6 +153,7 @@ object BackupCodec {
 /**
  * 字段级 Last-Write-Wins 合并：
  * 同一本书进度取 readAt 较大者、元数据取 updatedAt 较大者；书源按 updatedAt。
+ * 例外是书的**书源身份**：它跟进度绑成一体按 readAt 裁，章号不能脱离记下它的那个源（见 [mergeBook]）。
  *
  * **删除靠软删除墓碑表达**（`deleted = true` + 新的 updatedAt），而不是「从列表里消失」。
  * 从前是纯并集、不认墓碑，于是删除在多设备间根本留不住 —— 本地删掉的书源远端还在，
@@ -266,17 +267,55 @@ object BackupMerger {
         else -> local
     }
 
+    /**
+     * 一本书两边都有时怎么合。元数据（书名/分组/隐藏/删除）按 updatedAt，进度按 readAt。
+     *
+     * **书源身份（sourceId/bookUrl/tocUrl/章数）跟着进度走，不跟着元数据走**：章号只在记下它的那个源的
+     * 目录里有意义。从前书源随元数据按 updatedAt 裁、进度按 readAt 裁，两边换过源时就能拼出
+     * 「新源 + 旧源的章号」—— A 换源（新源前面多 3 章公告，进度对齐成 103）后同步，B 拿到了新源，
+     * 进度却因 readAt 打平留在自己的 100：落后 3 章，下次同步还把这个错位推回给 A。
+     *
+     * 两边源不同时，就把「书源 + 进度」当一个整体：readAt 新的一边整体胜出（换源本身会盖 readAt，
+     * 见 NetBookRepository.changeSource），打平时随元数据的裁决。选这个而不是「一律取元数据那边的进度」：
+     * 后者在另一台设备换源之后、同步之前还在旧源上往下读的情况下，会把这段新进度整个丢掉；
+     * 而整体取 readAt 新的一边，最坏也只是换源被撤回、书停在旧源上 —— 章号和源始终对得上，
+     * 旧源真读不了时自动换源会按章节标题再对齐一次。
+     */
     private fun mergeBook(l: BackupBook, r: BackupBook): BackupBook {
         val meta = if (r.updatedAt > l.updatedAt) r else l
-        val progress = if (r.readAt > l.readAt) r else l
+        // 封面不走 LWW，走「谁有算谁的」：它不是用户改得动的状态，null 只意味着
+        // 「这台机器还没拿到」。按 LWW 裁的话，接收端只要读过一次书（updatedAt 一更新），
+        // 本地那条空封面就会一直赢下去，封面永远补不回来。
+        val coverUrl = meta.coverUrl ?: l.coverUrl ?: r.coverUrl
+        if (sameSource(l, r)) {
+            val progress = if (r.readAt > l.readAt) r else l
+            return meta.copy(
+                readChapterIndex = progress.readChapterIndex,
+                readCharOffset = progress.readCharOffset,
+                readAt = progress.readAt,
+                coverUrl = coverUrl,
+            )
+        }
+        val position = when {
+            r.readAt > l.readAt -> r
+            l.readAt > r.readAt -> l
+            // 打平多半是老版本换源（那时不盖 readAt）：此时只有 updatedAt 记着「换过源」这件事
+            else -> meta
+        }
         return meta.copy(
-            readChapterIndex = progress.readChapterIndex,
-            readCharOffset = progress.readCharOffset,
-            readAt = progress.readAt,
-            // 封面不走 LWW，走「谁有算谁的」：它不是用户改得动的状态，null 只意味着
-            // 「这台机器还没拿到」。按 LWW 裁的话，接收端只要读过一次书（updatedAt 一更新），
-            // 本地那条空封面就会一直赢下去，封面永远补不回来。
-            coverUrl = meta.coverUrl ?: l.coverUrl ?: r.coverUrl,
+            sourceId = position.sourceId,
+            bookUrl = position.bookUrl,
+            tocUrl = position.tocUrl,
+            // 章数是那个源的目录的章数；拿另一个源的去比大小没有意义
+            totalChapters = position.totalChapters,
+            readChapterIndex = position.readChapterIndex,
+            readCharOffset = position.readCharOffset,
+            readAt = position.readAt,
+            coverUrl = coverUrl,
         )
     }
+
+    /** 两份记录是不是同一个书源上的同一本书（本地书两边都是 null，也算同一个） */
+    fun sameSource(a: BackupBook, b: BackupBook): Boolean =
+        a.sourceId == b.sourceId && a.bookUrl == b.bookUrl
 }

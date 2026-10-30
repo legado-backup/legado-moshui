@@ -35,6 +35,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import java.io.IOException
 
 class WebDavRepository(
     private val db: InkwellDb,
@@ -97,7 +98,17 @@ class WebDavRepository(
         // 远端文件损坏（上传中断留半截、被别的客户端写坏）时 decode 会抛异常。若让它把整个 sync
         // 拖垮，PUT 永远执行不到 → 损坏文件永远修不好、同步永久瘫痪。这里把损坏视作「远端没有可用备份」，
         // 照常用本地覆盖上去，下一次同步就自愈了。
-        val remote = client.get(BACKUP)?.let { runCatching { BackupCodec.decode(it) }.getOrNull() }
+        // 只认 Exception（gzip 截断、JSON 坏掉）：内存不够解不开**不是**文件坏了 —— 从前 runCatching 连 OOM
+        // 一起吞，当成「远端没有」，随后就拿本地把别的设备的整份数据盖掉。那种情况让这次同步失败、远端原样留着。
+        val remote = client.get(BACKUP)?.let { bytes ->
+            try {
+                BackupCodec.decode(bytes)
+            } catch (e: OutOfMemoryError) {
+                throw IOException("远端备份太大，本机内存不足以解析，本次同步已跳过", e)
+            } catch (_: Exception) {
+                null
+            }
+        }
         // 本地快照在下载**之后**再拍：备份动辄几 MB，冷启动同步下载的那几秒里用户删书、隐藏、
         // 改分组，按下载前的快照合并会把这些修改原样写回去（删掉的书复活）。
         // 拍完到写回之间仍有一小段合并耗时，那段由 applyBooks / applySources 按时间戳兜住。
@@ -109,8 +120,8 @@ class WebDavRepository(
             toUpload = local
         } else {
             val merged = BackupMerger.merge(local, remote)
-            applyToLocal(merged)
-            applied = merged.changedBooks.size +
+            // 书目按真正写了库的条数算：合并说「变了」的，按事务里的最新行可能一条都不采纳
+            applied = applyToLocal(merged) +
                 merged.changedSources.size +
                 merged.changedReplaceRules.size +
                 merged.changedRssSources.size +
@@ -154,9 +165,16 @@ class WebDavRepository(
                 deleted = b.deleted,
             )
         },
-        // 逐条取完整行：SELECT * 全表会把大 JSON 塞进 CursorWindow（~2MB）直接闪退
+        // 逐条取完整行：SELECT * 全表会把大 JSON 塞进 CursorWindow（~2MB）直接闪退。
+        // 单行超大读不出来就跳过这一条（远端那份照旧留在合并结果里）；取消照常往外抛
         sources = sourceDao.getAllIdsIncludingDeleted().mapNotNull { id ->
-            runCatching { sourceDao.getById(id) }.getOrNull()
+            try {
+                sourceDao.getById(id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
         }.map { s ->
             BackupSource(
                 id = s.id, name = s.name, enabled = s.enabled, json = s.json,
@@ -183,19 +201,18 @@ class WebDavRepository(
         appSettings = appPrefs.exportForBackup(),
     )
 
-    private suspend fun applyToLocal(merged: BackupMerger.MergeResult) {
+    private suspend fun applyToLocal(merged: BackupMerger.MergeResult): Int {
         // 另一台设备换过源的书：sourceId / bookUrl 跟本地对不上。目录表不进备份，本地留着的
         // 还是**旧源**的章节 URL，拿去配新源的规则抓正文必失败 → 触发自动换源 → 又换到第三个源、
         // updatedAt 刷新 → 下次同步反过来盖掉对面 —— 两台设备来回乒乒。本地换源
         // （NetBookRepository.changeSource）是「清目录 + 清缓存 + 改书行」一起做的，远端来的
         // 换源也得走同一条路：目录清空后，阅读页「目录为空则先拉一次」自然接管。
-        // 缓存是文件 IO，放事务外先做；目录删除跟书行更新同一事务。
+        // 缓存是文件 IO，放事务外先做（按这一刻的行判断，尽力而为）；目录删除跟书行更新同一事务、按事务里的最新行判断。
         val resourced = merged.changedBooks.filter { b ->
             val existing = bookDao.getById(b.id) ?: return@filter false
-            // 元数据不会被采纳（本地在快照之后又改过，见 applyBooks）就谈不上换源
-            existing.type == BookType.NET && b.updatedAt > existing.updatedAt &&
-                (existing.sourceId != b.sourceId || existing.bookUrl != b.bookUrl)
-        }.map { it.id }.toSet()
+            // 书源不会被采纳（本地在快照之后又读过/换过源，见 applySyncedBook）就谈不上换源
+            applySyncedBook(existing, b).sourceChanged
+        }.map { it.id }
         if (resourced.isNotEmpty()) {
             withContext(Dispatchers.IO) { resourced.forEach { cache.clear(it) } }
         }
@@ -204,12 +221,12 @@ class WebDavRepository(
         // 先记下要清的（事务里会改掉 deleted），目录行随事务删，文件 IO 放在事务之后
         val remotelyDeleted = merged.changedBooks.mapNotNull { b ->
             val existing = bookDao.getById(b.id) ?: return@mapNotNull null
-            existing.takeIf { b.deleted && !it.deleted && b.updatedAt > it.updatedAt }
+            existing.takeIf { applySyncedBook(it, b).deletedRemotely }
         }
 
         // 几十条逐行写 + 三张表：中途被杀不留半套。远端设置的导入是 DataStore，在事务外。
-        db.withWriteTransaction {
-            applyBooks(merged, resourced)
+        val appliedBooks = db.withWriteTransaction {
+            val n = applyBooks(merged)
             applySources(merged)
             replaceRules.upsertAll(
                 merged.changedReplaceRules.map { r ->
@@ -228,6 +245,7 @@ class WebDavRepository(
                     )
                 }
             )
+            n
         }
         if (remotelyDeleted.isNotEmpty()) {
             withContext(Dispatchers.IO) {
@@ -237,46 +255,23 @@ class WebDavRepository(
         }
         merged.readerSettings?.let { readerPrefs.importFromBackup(it) }
         merged.appSettings?.let { appPrefs.importFromBackup(it) }
+        return appliedBooks
     }
 
-    private suspend fun applyBooks(merged: BackupMerger.MergeResult, resourced: Set<String>) {
+    /** @return 真正写了库的书目数。合并结果里「变了」的条目，到了事务里按最新行可能一条都不采纳 */
+    private suspend fun applyBooks(merged: BackupMerger.MergeResult): Int {
+        var applied = 0
         merged.changedBooks.forEach { b ->
             val existing = bookDao.getById(b.id)
             if (existing != null) {
-                val sourceChanged = b.id in resourced
-                val deletedRemotely = b.deleted && !existing.deleted && b.updatedAt > existing.updatedAt
-                if (sourceChanged || deletedRemotely) chapterDao.deleteByBook(b.id)
-                // 合并只在远端时间戳**严格更大**时才取远端那一份（相等算本地）。拿事务里的最新行再比一次：
-                // 本地在拍快照之后又改过（时间戳已经比合并结果新），那一块就保留本地的 ——
-                // 否则用户刚做的修改被合并结果里的旧值盖回去，还会随下一次上传扩散到所有设备。
-                val takeMeta = b.updatedAt > existing.updatedAt
-                val takeProgress = b.readAt > existing.readAt
-                val meta = if (takeMeta) {
-                    existing.copy(
-                        title = b.title, author = b.author, intro = b.intro,
-                        sourceId = b.sourceId, bookUrl = b.bookUrl, tocUrl = b.tocUrl,
-                        updatedAt = b.updatedAt,
-                        groupName = b.groupName, hidden = b.hidden,
-                        deleted = b.deleted,
-                        // 备份里的都是真正上过架的书（或墓碑）。本地若还是试读行，
-                        // 被远端一份活书盖过来时必须上架，否则书架上永远看不见。
-                        inShelf = !b.deleted,
-                    )
-                } else {
-                    existing
+                // 拿事务里的最新行裁决：本地在拍快照之后又改过（时间戳已经比合并结果新），那一块就保留本地的
+                val synced = applySyncedBook(existing, b)
+                if (synced.sourceChanged || synced.deletedRemotely) chapterDao.deleteByBook(b.id)
+                // 一个字段都没变就别写：整表 Flow 白重发一轮，还会把这条算进「合并了 N 项」
+                if (synced.entity != existing) {
+                    bookDao.update(synced.entity)
+                    applied++
                 }
-                bookDao.update(
-                    meta.copy(
-                        // 只补空，不覆盖：本地书这一列是有效的本机文件路径，
-                        // 而远端对本地书永远给 null —— 拿 null 盖上去等于把封面弄丢。
-                        coverPath = existing.coverPath ?: remoteCover(b),
-                        // 换了源就按新源的章节数来，旧源的更大值对新目录没有意义
-                        totalChapters = if (sourceChanged) b.totalChapters else maxOf(existing.totalChapters, b.totalChapters),
-                        readChapterIndex = if (takeProgress) b.readChapterIndex else existing.readChapterIndex,
-                        readCharOffset = if (takeProgress) b.readCharOffset else existing.readCharOffset,
-                        readAt = if (takeProgress) b.readAt else existing.readAt,
-                    )
-                )
             } else {
                 // 远端新增：本地占位（本地书缺文件时详情页提示重新导入；网络书可直接读）
                 bookDao.upsert(
@@ -295,16 +290,11 @@ class WebDavRepository(
                         inShelf = !b.deleted,
                     )
                 )
+                applied++
             }
         }
+        return applied
     }
-
-    /**
-     * 远端封面只对网络书采纳 —— 与导出侧 [buildLocalPayload] 的约定一致：本地书的封面是本机路径，
-     * 导出时永远给 null。本地书却带着一个「封面」，只可能是被改过的备份；而本地书的 coverPath
-     * 会被当成本机文件读、删，不能让备份往里填路径。
-     */
-    private fun remoteCover(b: BackupBook): String? = b.coverUrl?.takeIf { b.type == BookType.NET }
 
     private suspend fun applySources(merged: BackupMerger.MergeResult) {
         merged.changedSources.forEach { s ->
@@ -332,4 +322,83 @@ class WebDavRepository(
         val obj = root as? JsonObject ?: root.jsonObject
         BookSourceTypes.isTextNovel(BookSourceTypes.parse(obj))
     }.getOrDefault(false)
+}
+
+/**
+ * 远端封面只对网络书采纳 —— 与导出侧 `buildLocalPayload` 的约定一致：本地书的封面是本机路径，
+ * 导出时永远给 null。本地书却带着一个「封面」，只可能是被改过的备份；而本地书的 coverPath
+ * 会被当成本机文件读、删，不能让备份往里填路径。
+ */
+private fun remoteCover(b: BackupBook): String? = b.coverUrl?.takeIf { b.type == BookType.NET }
+
+/** 同步来的一条书目落到本机已有书行上的结果 */
+internal data class SyncedBook(
+    val entity: BookEntity,
+    /** 采纳了另一个源：本机目录与正文缓存都还是旧源的，要清掉，阅读页会按新源重新拉目录 */
+    val sourceChanged: Boolean,
+    /** 远端删掉了：本机目录跟着清，书文件/封面/缓存由调用方在事务外清 */
+    val deletedRemotely: Boolean,
+)
+
+/**
+ * 合并结果里的一条书目怎么落到本机**最新**的那一行上（调用方在写事务里重读后传进来）。
+ *
+ * 规则与 BackupMerger.mergeBook 一致，只是对面换成了事务里的最新行：合并只在远端时间戳**严格更大**时
+ * 才取远端那一份（相等算本地），本地在拍快照之后又改过（时间戳已经比合并结果新），那一块就保留本地的 ——
+ * 否则用户刚做的修改被合并结果里的旧值盖回去，还会随下一次上传扩散到所有设备。
+ *
+ * 抽成纯函数是为了能脱离 Room 单测。
+ */
+internal fun applySyncedBook(existing: BookEntity, b: BackupBook): SyncedBook {
+    // 本机这一行只是试读（预览直读落的库，不进备份），远端却是一本真正在架上的书：别的设备把它加上了书架，
+    // 这台只是之后点开看了一眼。试读行的 updatedAt 是点开那一刻盖的，按 LWW 它永远比远端新 ——
+    // 这本书在这台设备上就一直看不见，每次同步还都报「合并了 1 项远端更新」。
+    // 试读不算用户对「在不在架」表过态，在架状态与元数据直接听远端的。
+    val previewOnly = !existing.inShelf && !existing.deleted && !b.deleted
+    val takeMeta = previewOnly || b.updatedAt > existing.updatedAt
+    val sameSource = existing.sourceId == b.sourceId && existing.bookUrl == b.bookUrl
+    // 书源身份跟进度绑在一起裁：章号只在记下它的那个源的目录里有意义，不能拿 A 源的章号配 B 源的目录。
+    // 两边源不同时 readAt 新的一边整体胜出，打平随元数据（理由见 BackupMerger.mergeBook）
+    val takePosition = if (sameSource) {
+        b.readAt > existing.readAt
+    } else {
+        b.readAt > existing.readAt || (b.readAt == existing.readAt && takeMeta)
+    }
+    val sourceChanged = existing.type == BookType.NET && !sameSource && takePosition
+    val deletedRemotely = b.deleted && !existing.deleted && b.updatedAt > existing.updatedAt
+    // 同一个源时 tocUrl 照旧随元数据；不同源时整套地址都跟着进度那一边
+    val identityFromRemote = if (sameSource) takeMeta else takePosition
+
+    val meta = if (takeMeta) {
+        existing.copy(
+            title = b.title, author = b.author, intro = b.intro,
+            updatedAt = b.updatedAt,
+            groupName = b.groupName, hidden = b.hidden,
+            deleted = b.deleted,
+            // 备份里的都是真正上过架的书（或墓碑）。本地若还是试读行，
+            // 被远端一份活书盖过来时必须上架，否则书架上永远看不见。
+            inShelf = !b.deleted,
+        )
+    } else {
+        existing
+    }
+    val entity = meta.copy(
+        sourceId = if (identityFromRemote) b.sourceId else existing.sourceId,
+        bookUrl = if (identityFromRemote) b.bookUrl else existing.bookUrl,
+        tocUrl = if (identityFromRemote) b.tocUrl else existing.tocUrl,
+        // 只补空，不覆盖：本地书这一列是有效的本机文件路径，
+        // 而远端对本地书永远给 null —— 拿 null 盖上去等于把封面弄丢。
+        coverPath = existing.coverPath ?: remoteCover(b),
+        totalChapters = when {
+            sameSource -> maxOf(existing.totalChapters, b.totalChapters)
+            // 换了源就按新源的章节数来，旧源的更大值对新目录没有意义
+            takePosition -> b.totalChapters
+            // 反过来也一样：留在本机这个源上，就别拿另一个源的章数来比大小
+            else -> existing.totalChapters
+        },
+        readChapterIndex = if (takePosition) b.readChapterIndex else existing.readChapterIndex,
+        readCharOffset = if (takePosition) b.readCharOffset else existing.readCharOffset,
+        readAt = if (takePosition) b.readAt else existing.readAt,
+    )
+    return SyncedBook(entity, sourceChanged, deletedRemotely)
 }

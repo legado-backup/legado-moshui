@@ -148,6 +148,80 @@ class BackupMergerTest {
         assertEquals(1, result.changedSources.size)
     }
 
+    // ---------- 换源：书源身份跟着进度走 ----------
+
+    private fun netBook(
+        source: String,
+        readChapter: Int,
+        readAt: Long,
+        updatedAt: Long,
+        totalChapters: Int = 0,
+    ) = BackupBook(
+        id = "n", type = 3, title = "网书",
+        sourceId = source, bookUrl = "https://$source/book", tocUrl = "https://$source/toc",
+        totalChapters = totalChapters,
+        readChapterIndex = readChapter, readAt = readAt, updatedAt = updatedAt,
+    )
+
+    /**
+     * A 换源（新源前面多 3 章公告，进度对齐成 103），B 还停在旧源的 100。从前书源按 updatedAt 取了 A 的新源、
+     * 进度按 readAt 取了 B 自己的 100 —— 新源 + 旧源章号，B 落后 3 章。换源会盖 readAt，书源与进度一起赢。
+     */
+    @Test
+    fun `另一台设备换源后 书源与对齐后的进度一起过来`() {
+        val b = netBook("old", readChapter = 100, readAt = 100, updatedAt = 100, totalChapters = 500)
+        val a = netBook("new", readChapter = 103, readAt = 200, updatedAt = 200, totalChapters = 503)
+        val merged = BackupMerger.merge(payload(b), payload(a)).books.single()
+        assertEquals("new", merged.sourceId)
+        assertEquals("https://new/toc", merged.tocUrl)
+        assertEquals(103, merged.readChapterIndex)
+        assertEquals(503, merged.totalChapters)
+    }
+
+    /** 老版本换源不盖 readAt：进度打平时只有 updatedAt 记着「换过源」，此时跟着元数据那一边 */
+    @Test
+    fun `readAt 打平且书源不同时跟元数据那一边的书源与进度`() {
+        val b = netBook("old", readChapter = 100, readAt = 100, updatedAt = 100)
+        val a = netBook("new", readChapter = 103, readAt = 100, updatedAt = 200)
+        val merged = BackupMerger.merge(payload(b), payload(a)).books.single()
+        assertEquals("new", merged.sourceId)
+        assertEquals(103, merged.readChapterIndex)
+        // 两个方向都一样，不因谁是本地而变
+        val reversed = BackupMerger.merge(payload(a), payload(b)).books.single()
+        assertEquals("new", reversed.sourceId)
+        assertEquals(103, reversed.readChapterIndex)
+    }
+
+    /**
+     * A 换源之后、同步之前，B 又在旧源上往下读了一大段。进度不能丢，也不能把旧源的章号配到新源上：
+     * 书源与进度整体取 B 的（换源被撤回，但章号与源对得上），分组这类元数据照旧按 updatedAt 取 A 的。
+     */
+    @Test
+    fun `换源后另一台在旧源上读得更新 书源与进度整体取读得新的一边`() {
+        val b = netBook("old", readChapter = 150, readAt = 300, updatedAt = 100, totalChapters = 500)
+        val a = netBook("new", readChapter = 103, readAt = 200, updatedAt = 200, totalChapters = 503)
+            .copy(groupName = "追更")
+        val merged = BackupMerger.merge(payload(a), payload(b)).books.single()
+        assertEquals("old", merged.sourceId)
+        assertEquals("https://old/book", merged.bookUrl)
+        assertEquals(150, merged.readChapterIndex)
+        assertEquals(300, merged.readAt)
+        assertEquals(500, merged.totalChapters)
+        assertEquals("追更", merged.groupName)
+    }
+
+    /** 同一个源上照旧：元数据与进度各自独立裁决 */
+    @Test
+    fun `同一个源上进度与元数据仍各自独立`() {
+        val local = netBook("s", readChapter = 20, readAt = 300, updatedAt = 100, totalChapters = 50)
+        val remote = netBook("s", readChapter = 3, readAt = 100, updatedAt = 500, totalChapters = 60)
+            .copy(groupName = "新分组")
+        val merged = BackupMerger.merge(payload(local), payload(remote)).books.single()
+        assertEquals("新分组", merged.groupName)
+        assertEquals(20, merged.readChapterIndex)
+        assertEquals(60, merged.totalChapters)
+    }
+
     @Test
     fun `codec roundtrip with gzip`() {
         val p = payload(book("a", readChapter = 7, readAt = 42))

@@ -9,6 +9,7 @@ import com.radium.inkwell.data.db.dao.BookSourceHitDao
 import com.radium.inkwell.data.db.entity.BookSourceEntity
 import com.radium.inkwell.data.db.entity.BookSourceListItem
 import com.radium.inkwell.data.db.entity.CheckStatus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -69,7 +70,14 @@ class BookSourceRepository(
      * 音频/漫画/文件/视频源按类型过滤并计入 skipped。规则原文原样入库，运行期由引擎直接求值。
      */
     suspend fun importJson(text: String): Result<ImportReport> = withContext(Dispatchers.Default) {
-        runCatching { importJsonInternal(text) }
+        try {
+            Result.success(importJsonInternal(text))
+        } catch (e: CancellationException) {
+            // 导入要写库（挂起）：用户离开页面是取消，别包成「导入失败」吞掉
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     /**
@@ -290,6 +298,9 @@ class BookSourceRepository(
     private suspend fun loadEntity(id: String): BookSourceEntity? =
         try {
             dao.getById(id)
+        } catch (e: CancellationException) {
+            // CancellationException 本身就是 IllegalStateException 的子类：不先挑出来，取消也被下面吞成「读不出这一行」
+            throw e
         } catch (_: IllegalStateException) {
             null
         }

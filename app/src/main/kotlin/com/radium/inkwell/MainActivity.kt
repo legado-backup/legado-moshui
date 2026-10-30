@@ -35,7 +35,8 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        if (intent.getBooleanExtra(ProfileSeed.EXTRA, false)) {
+        // 夹具开关先判：正式包里这个 extra 谁都能塞进来（桌面 alias 是 exported 的），见 ProfileSeed
+        if (ProfileSeed.enabled(this) && intent.getBooleanExtra(ProfileSeed.EXTRA, false)) {
             lifecycleScope.launch {
                 ProfileSeed.importIfRequested(this@MainActivity, true)
             }

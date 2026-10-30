@@ -145,14 +145,19 @@ class OfficialWebDavClient(
         request<Sent>(DELETE, "/api/v1/app-passwords/$id", access = accessToken)
     }
 
+    /** 尽力通知服务端作废会话：网络/服务端出错只是没注销掉，不挡本地断开。取消照常往外抛 */
     suspend fun logout(accessToken: String, refreshToken: String) {
-        runCatching {
+        try {
             request<Sent>(
                 POST,
                 "/api/v1/auth/logout",
                 """{"refresh_token":${refreshToken.json()}}""",
                 access = accessToken,
             )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // 服务端那边留着的会话到期自然失效
         }
     }
 

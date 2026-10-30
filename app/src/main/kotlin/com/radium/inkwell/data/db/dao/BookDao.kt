@@ -38,6 +38,10 @@ interface BookDao {
     @Query("DELETE FROM book WHERE id = :id")
     suspend fun hardDelete(id: String)
 
+    /** 有几行指向这个本机文件。导入回滚前用它确认「事务其实已经提交了」，见 BookRepository.rollbackImport */
+    @Query("SELECT COUNT(*) FROM book WHERE localPath = :path")
+    suspend fun countByLocalPath(path: String): Int
+
     /**
      * 写进度；**位置没变就不动 readAt**。同步按 readAt 裁决进度，打开书时首屏、退出时 flush 都会来写一次 ——
      * 一律盖新时间戳的话，还没同步的旧设备开一下书就拿旧位置赢过别的设备。
