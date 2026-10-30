@@ -11,12 +11,16 @@ import com.radium.inkwell.data.prefs.AppPrefs
 import com.radium.inkwell.data.repo.AutoSourceSwitcher
 import com.radium.inkwell.data.repo.BookRepository
 import com.radium.inkwell.data.repo.BookSourceRepository
+import com.radium.inkwell.data.repo.BookSourceRepository.EnabledSource
 import com.radium.inkwell.data.repo.NetBookRepository
+import com.radium.inkwell.data.repo.TitleMatch
 import com.radium.inkwell.ui.bookshelf.searchableShelfKeys
 import com.radium.inkwell.ui.components.MessageBus
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -100,6 +104,13 @@ data class SearchUiState(
      * 自动恢复会跟详情页抢网，刚打开的书又开始转圈。
      */
     val searchPaused: Boolean = false,
+    /** 暂停时还没搜的书源数 */
+    val pausedRemaining: Int = 0,
+    /**
+     * 这次暂停是「提前结束」：书名完全一致的结果已经来自够多个书源（见 [SearchScheduling.EARLY_STOP_SOURCES]），
+     * 剩下的先不搜。与进详情页的暂停同一套机制，只是提示语不同 —— 别让用户以为搜索坏了、卡住了。
+     */
+    val earlyStopped: Boolean = false,
     /** 书架已有书的 (书名,作者) 键；列表据此把已在架的书显示为"已加入"（隐藏区上锁时不含隐藏的书） */
     val shelfKeys: Set<Pair<String, String>> = emptySet(),
 )
@@ -139,6 +150,26 @@ class SearchViewModel(
     private val doneCounter = AtomicInteger(0)
     /** 每一轮搜索 +1。被 cancel 的旧协程 finally 里不许再动下一轮的 pending / moreAcc */
     private var roundGen: Int = 0
+
+    /**
+     * 各书源此刻的搜索测速：进页后第一次搜索从库里读来，之后每个源回来就按结局更新（[SearchScheduling.next]）。
+     * 定超时、排先后都读它而不是库里那份 —— 同一页里连搜几次、翻页那一轮，就能用上刚测到的速度。
+     */
+    private val liveSpeed = java.util.concurrent.ConcurrentHashMap<String, EnabledSource>()
+    /** 已经落库的那份；[flushSearchStats] 拿它比，变化够大才写（[SearchScheduling.worthPersisting]） */
+    private val persistedSpeed = java.util.concurrent.ConcurrentHashMap<String, EnabledSource>()
+
+    /** 本轮允不允许提前结束：只在新搜索的第一页、书源够多时开；触发过一次或点了「继续搜索」就关掉 */
+    private var earlyStopArmed = false
+    private var normalizedKeyword = ""
+    /** 交回过书名完全一致结果的书源 */
+    private val exactTitleSources = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    // 一轮搜索的耗时概要，写进日志（开发者模式的运行日志录的就是 logcat）。调调度参数得先有数
+    private var searchStartedAt = 0L
+    private var firstResultAt = 0L
+    private val timeoutCount = AtomicInteger(0)
+    private val failCount = AtomicInteger(0)
 
     /** 暂停时拍下还没跑完的源；返回列表后 [resumeSearch] 接着跑，不重开一轮、不清已有结果 */
     private var paused: PausedSearch? = null
@@ -240,9 +271,14 @@ class SearchViewModel(
         // 刚清空的 hits，串进新搜索列表
         pagingJob?.cancel()
         searchJob = viewModelScope.launch {
+            // 上一轮被新搜索打断时没走到收尾，它测到的速度在这里落库
+            flushSearchStats()
             val enabled = sourceRepo.getEnabledForSwitch()
             sourceMeta = enabled
-            val rules = enabled.map { it.rule }.filter { it.search != null }
+            // 快的、活的先发，坏源排到最后（见 SearchScheduling）。从前按书源管理里的手动顺序发，
+            // 一个吊死的源排在前面就占着一个并发名额等满超时，健康的源在后面干等
+            val searchable = SearchScheduling.order(withLiveSpeed(enabled.filter { it.rule.search != null }))
+            val rules = searchable.map { it.rule }
             if (rules.isEmpty()) {
                 // 区分"没有书源"和"启用的都是仅发现页的源"，后者曾误导用户以为启用没生效
                 messages.emit(
@@ -257,11 +293,20 @@ class SearchViewModel(
             moreAcc.clear()
             pagingRules = emptyList()
             doneCounter.set(0)
+            normalizedKeyword = TitleMatch.normalize(keyword)
+            exactTitleSources.clear()
+            earlyStopArmed = rules.size >= SearchScheduling.EARLY_STOP_MIN_SOURCES && normalizedKeyword.isNotEmpty()
+            searchStartedAt = nowMs()
+            firstResultAt = 0L
+            timeoutCount.set(0)
+            failCount.set(0)
             val searchId = _state.value.searchId + 1
             inFlightPage = 1
             _state.value = _state.value.copy(
                 searching = true,
                 searchPaused = false,
+                earlyStopped = false,
+                pausedRemaining = 0,
                 results = emptyList(),
                 sourceCount = rules.size, doneCount = 0,
                 page = 1, hasMore = false, loadingMore = false,
@@ -298,10 +343,13 @@ class SearchViewModel(
                 searching = false,
                 loadingMore = false,
                 searchPaused = remaining.isNotEmpty(),
+                pausedRemaining = remaining.size,
                 // 暂停期间不准翻页：pagingRules 可能还是上一轮残留，和当前关键词对不上
                 hasMore = false,
             )
         }
+        // 被掐掉的这一轮走不到 finishRound，已经测到的速度在这里落库
+        flushSearchStats()
         val searchId = s.searchId
         val keyword = activeKeyword
         viewModelScope.launch {
@@ -316,6 +364,9 @@ class SearchViewModel(
     fun resumeSearch() {
         val p = paused ?: return
         paused = null
+        // 点了「继续搜索」就是要全量结果：别搜两下又提前结束一次
+        earlyStopArmed = false
+        _state.update { it.copy(earlyStopped = false) }
         if (p.fetchPage == 1) {
             searchJob?.cancel()
             searchJob = viewModelScope.launch { resumeRound(p) }
@@ -363,12 +414,23 @@ class SearchViewModel(
                         val pageResult = searchPage(rule, keyword, page)
                         if (_state.value.searchId != searchId) return@withPermit
                         if (countProgress) {
-                            hitsMutex.withLock { merge(pageResult?.items.orEmpty()) }
+                            val items = pageResult?.items.orEmpty()
+                            hitsMutex.withLock { merge(items) }
                             if (gen != roundGen) return@withPermit
+                            if (items.isNotEmpty() && firstResultAt == 0L) firstResultAt = nowMs()
                             val d = doneCounter.incrementAndGet()
                             _state.update { it.copy(doneCount = d) }
                             schedulePublish(keyword, searchId)
                             if (pageResult?.hasMore == true) moreAcc += rule
+                            if (earlyStopArmed && items.any { SearchScheduling.isExactTitle(it.title, normalizedKeyword) }) {
+                                exactTitleSources += rule.id
+                                if (exactTitleSources.size >= SearchScheduling.EARLY_STOP_SOURCES) {
+                                    // 这个源已经搜完了，别留在「待搜」里 —— 否则继续搜索时它会再被请求一遍
+                                    pendingIds.remove(rule.id)
+                                    // 正好是最后一个源就没什么可省的了：照常收尾，别丢掉 finishRound 里的「加载更多」
+                                    if (pendingIds.isNotEmpty()) stopEarly(keyword)
+                                }
+                            }
                         } else {
                             val gotNew = hitsMutex.withLock {
                                 val before = hits.size
@@ -398,6 +460,8 @@ class SearchViewModel(
         val sorted = orderedNow(snapshot, keyword)
         val more = moreAcc.toList()
         pagingRules = more
+        flushSearchStats()
+        if (fetchPage == 1) logSummary(keyword, "搜完")
         if (_state.value.searchId != searchId) return
         _state.value = _state.value.copy(
             results = sorted,
@@ -533,19 +597,97 @@ class SearchViewModel(
      * 旧关键词的结果会串进刚 clear 过的 hits，翻页那一轮还会把过期的 page/hasMore 盖回去
      * （新搜索刚设成 page=1，僵尸协程一句 `page = next` 就把它推到 2）。
      */
-    private suspend fun searchPage(rule: BookSourceRule, keyword: String, page: Int): SearchPage? =
-        try {
-            // 与换源单源超时对齐：吊源别占着 Semaphore 名额拖整轮搜索
-            withTimeoutOrNull(SEARCH_TIMEOUT_MS) {
+    private suspend fun searchPage(rule: BookSourceRule, keyword: String, page: Int): SearchPage? {
+        // 每个源按自己的历史定超时（见 SearchScheduling.timeoutMs）：吊源别占着 Semaphore 名额拖整轮搜索。
+        // 从前统一等 30 秒，几十个死源就能把一轮搜索拖到几分钟
+        val limit = SearchScheduling.timeoutMs(liveSpeed[rule.id])
+        val startedAt = nowMs()
+        return try {
+            val result = withTimeoutOrNull(limit) {
                 engine.search(rule, keyword, page = page)
             }
+            record(rule.id, if (result == null) SearchOutcome.TimedOut(limit) else SearchOutcome.Ok(nowMs() - startedAt))
+            result
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             // 界面上照旧静默（几十个源里挂几个是常态），但日志里得留下是哪个源、为什么
             Log.w(TAG, "搜索失败：书源「${rule.name}」第 $page 页", e)
+            record(rule.id, SearchOutcome.Failed)
             null
         }
+    }
+
+    // ---- 测速与提前结束 ----
+
+    /**
+     * 库里读来的书源配上本页已经测到的速度：同一页里连着搜，第二次就按第一次测到的排、定超时，
+     * 不必等上一轮异步落库。规则本身（及校验结论）以库里新读的为准。
+     */
+    private fun withLiveSpeed(fresh: List<EnabledSource>): List<EnabledSource> = fresh.map { s ->
+        val live = liveSpeed[s.rule.id]
+        val merged = if (live == null) s else s.copy(searchMs = live.searchMs, searchFails = live.searchFails)
+        liveSpeed[s.rule.id] = merged
+        persistedSpeed.putIfAbsent(s.rule.id, s)
+        merged
+    }
+
+    private fun record(sourceId: String, outcome: SearchOutcome) {
+        liveSpeed.computeIfPresent(sourceId) { _, s -> SearchScheduling.next(s, outcome) }
+        when (outcome) {
+            is SearchOutcome.TimedOut -> timeoutCount.incrementAndGet()
+            SearchOutcome.Failed -> failCount.incrementAndGet()
+            is SearchOutcome.Ok -> Unit
+        }
+    }
+
+    /**
+     * 把变化够大的测速写回库里，下次进页搜索就能用上。
+     * 不绑 viewModelScope：收尾、暂停、离开页面都会调，离开页面时 viewModelScope 已经取消了。
+     */
+    private fun flushSearchStats() {
+        val changed = liveSpeed.values.filter { live ->
+            val before = persistedSpeed[live.rule.id] ?: return@filter false
+            SearchScheduling.worthPersisting(before, live)
+        }
+        if (changed.isEmpty()) return
+        changed.forEach { persistedSpeed[it.rule.id] = it }
+        CoroutineScope(Dispatchers.IO + NonCancellable).launch {
+            try {
+                sourceRepo.saveSearchStats(changed)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "搜索测速写库失败", e)
+            }
+        }
+    }
+
+    /**
+     * 提前结束：书名完全一致的结果已经来自够多个书源，剩下的先不搜。走与「进详情页暂停」同一条路 ——
+     * 剩余的源拍下来，列表上方给「继续搜索」；要全量结果的人点一下就接着搜，已有结果一条不丢。
+     */
+    private fun stopEarly(keyword: String) {
+        earlyStopArmed = false
+        logSummary(keyword, "提前结束")
+        pauseSearch()
+        if (paused != null) _state.update { it.copy(earlyStopped = true) }
+    }
+
+    private fun logSummary(keyword: String, how: String) {
+        val first = if (firstResultAt > 0) "${firstResultAt - searchStartedAt}ms" else "无"
+        Log.i(
+            TAG,
+            "搜索「$keyword」$how：${doneCounter.get()}/${_state.value.sourceCount} 个源，" +
+                "首条结果 $first，用时 ${nowMs() - searchStartedAt}ms，" +
+                "超时 ${timeoutCount.get()}，失败 ${failCount.get()}",
+        )
+    }
+
+    private fun nowMs(): Long = System.nanoTime() / 1_000_000
+
+    override fun onCleared() {
+        flushSearchStats()
+    }
 
     /** 还能继续翻页的书源（上一页 hasMore 为真的那些） */
     private var pagingRules: List<BookSourceRule> = emptyList()
@@ -615,7 +757,6 @@ class SearchViewModel(
 
     companion object {
         private const val TAG = "Search"
-        private const val SEARCH_TIMEOUT_MS = 30_000L
         private const val PUBLISH_DEBOUNCE_MS = 250L
         /** 详情+目录两个请求；三个源串起来不超过一分钟 */
         private const val ADD_TIMEOUT_MS = 20_000L

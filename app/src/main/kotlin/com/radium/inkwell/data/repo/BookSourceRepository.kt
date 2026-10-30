@@ -162,6 +162,9 @@ class BookSourceRepository(
                     checkMessage = keepCheck?.checkMessage.orEmpty(),
                     respondTime = keepCheck?.respondTime ?: -1,
                     checkedAt = keepCheck?.checkedAt ?: 0,
+                    // 搜索测速同理：规则一变，旧规则攒下的快慢与连续失败就不作数了
+                    searchMs = keepCheck?.searchMs ?: -1,
+                    searchFails = keepCheck?.searchFails ?: 0,
                 )
                 if (existing == null) added++ else updated++
             } catch (e: Exception) {
@@ -217,6 +220,8 @@ class BookSourceRepository(
                 checkStatus = entity.checkStatus,
                 respondTime = entity.respondTime,
                 sortOrder = entity.sortOrder,
+                searchMs = entity.searchMs,
+                searchFails = entity.searchFails,
             )
         }
     }
@@ -226,7 +231,18 @@ class BookSourceRepository(
         val checkStatus: Int,
         val respondTime: Long,
         val sortOrder: Int,
+        /** 搜索测速，见 [BookSourceEntity.searchMs] / [BookSourceEntity.searchFails] */
+        val searchMs: Long = -1,
+        val searchFails: Int = 0,
     )
+
+    /**
+     * 写回一轮搜索测到的速度。逐条 UPDATE、不包事务：调用方只交「变化够大」的那些（见 SearchScheduling），
+     * 一轮下来通常就几十条；而这个仓库不持有数据库句柄，单测靠假 DAO 跑，为它再引一个事务依赖不值。
+     */
+    suspend fun saveSearchStats(stats: Collection<EnabledSource>) {
+        for (s in stats) dao.saveSearchStats(s.rule.id, s.searchMs, s.searchFails)
+    }
 
     fun parseRule(text: String): Result<BookSourceRule> =
         runCatching { json.decodeFromString(text.trim()) }

@@ -27,7 +27,7 @@ import com.radium.inkwell.data.db.entity.RssSourceEntity
         ReplaceRuleEntity::class,
         RssSourceEntity::class,
     ],
-    version = 17,
+    version = 18,
     exportSchema = false,
 )
 abstract class InkwellDb : RoomDatabase() {
@@ -179,6 +179,17 @@ abstract class InkwellDb : RoomDatabase() {
         val MIGRATION_16_17 = object : Migration(16, 17) {
             override suspend fun migrate(connection: SQLiteConnection) {
                 connection.execSQL("ALTER TABLE book ADD COLUMN openedAt INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * 书源的搜索测速（滑动平均耗时 + 连续失败次数），搜索按它排先后、定超时。
+         * 只加列：默认 -1 / 0 即「没测过」，老用户第一次搜索照旧按校验结果与原顺序来，搜过几次才逐渐生效。
+         */
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE book_source ADD COLUMN searchMs INTEGER NOT NULL DEFAULT -1")
+                connection.execSQL("ALTER TABLE book_source ADD COLUMN searchFails INTEGER NOT NULL DEFAULT 0")
             }
         }
 

@@ -167,7 +167,12 @@ fun SearchScreen(
                         },
                     )
                     if (state.searchPaused) {
-                        SearchPauseBar(onResume = viewModel::resumeSearch)
+                        SearchPauseBar(
+                            // 提前结束要说清楚是「找到了」而不是「卡住了」，还剩多少源没搜
+                            label = if (state.earlyStopped) "已找到这本书，还有 ${state.pausedRemaining} 个书源没搜"
+                            else "搜索已暂停",
+                            onResume = viewModel::resumeSearch,
+                        )
                     }
                 }
             }
@@ -331,7 +336,7 @@ private fun SearchSortBar(
  * 密度和 [SearchSortBar] 同一套，避免进度条底下突然冒出一块 40dp 按钮。
  */
 @Composable
-private fun SearchPauseBar(onResume: () -> Unit) {
+private fun SearchPauseBar(label: String, onResume: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -339,7 +344,7 @@ private fun SearchPauseBar(onResume: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            "搜索已暂停",
+            label,
             modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

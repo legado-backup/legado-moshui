@@ -63,6 +63,10 @@ class BookSourceImportTest {
             }
         }
 
+        override suspend fun saveSearchStats(id: String, searchMs: Long, searchFails: Int) {
+            store[id]?.let { store[id] = it.copy(searchMs = searchMs, searchFails = searchFails) }
+        }
+
         override suspend fun setSortOrder(id: String, sortOrder: Int, now: Long) {
             store[id]?.let { store[id] = it.copy(sortOrder = sortOrder, updatedAt = now) }
         }
@@ -167,6 +171,23 @@ class BookSourceImportTest {
 
         repo.importJson(groupedSource("玄幻", search = "/search?q={{key}}")).getOrThrow()
         assertTrue(dao.store["https://g.com"]!!.updatedAt > 1_000)
+    }
+
+    /** 搜索测速跟校验结论同一套规矩：规则没变就留着，规则一变旧规则的快慢就不作数了 */
+    @Test
+    fun `原样重导保留搜索测速，规则变了清零`() = runTest {
+        val dao = FakeDao()
+        val repo = BookSourceRepository(dao, FakeHitDao())
+        repo.importJson(groupedSource("玄幻")).getOrThrow()
+        dao.saveSearchStats("https://g.com", searchMs = 1_200, searchFails = 1)
+
+        repo.importJson(groupedSource("玄幻")).getOrThrow()
+        assertEquals(1_200, dao.store["https://g.com"]!!.searchMs)
+        assertEquals(1, dao.store["https://g.com"]!!.searchFails)
+
+        repo.importJson(groupedSource("玄幻", search = "/search?q={{key}}")).getOrThrow()
+        assertEquals(-1, dao.store["https://g.com"]!!.searchMs)
+        assertEquals(0, dao.store["https://g.com"]!!.searchFails)
     }
 
     @Test
