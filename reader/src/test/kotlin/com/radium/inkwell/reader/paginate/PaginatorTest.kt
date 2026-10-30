@@ -150,6 +150,34 @@ class PaginatorTest {
     }
 
     @Test
+    fun `段尾断页时记下页尾段距，供滚动模式拼页补回`() {
+        // 第一段 150 字 = 10 行，正好填满一页；段距 20px 垫在页尾，第二段只能去下一页
+        val paras = listOf(ContentElement.Paragraph(cjk(150)), ContentElement.Paragraph(cjk(15)))
+        val result = paginator.paginate(0, "", ChapterContent(paras), spec(paragraphSpacing = 20f))
+        assertEquals(2, result.chapter.pages.size)
+        assertEquals(20f, result.chapter.pages[0].trailingGapPx)
+        // 翻页模式不受影响：下一页照旧从页顶起排
+        assertEquals(0f, (result.chapter.pages[1].items.first() as PageItem.TextSlice).yTopInPage)
+    }
+
+    @Test
+    fun `段中断页没有页尾段距`() {
+        // 300 字 = 20 行，一段跨两页：断在段中间，两半在滚动模式里本来就该无缝接上
+        val content = ChapterContent(listOf(ContentElement.Paragraph(cjk(300))))
+        val result = paginator.paginate(0, "", content, spec(paragraphSpacing = 20f))
+        assertEquals(2, result.chapter.pages.size)
+        assertEquals(0f, result.chapter.pages[0].trailingGapPx)
+    }
+
+    @Test
+    fun `章末一页不留页尾段距`() {
+        // 章与章之间由下一章标题的上间距隔开，章末再叠一层段距就把章缝撑大了
+        val paras = List(3) { ContentElement.Paragraph(cjk(15)) }
+        val result = paginator.paginate(0, "", ChapterContent(paras), spec(paragraphSpacing = 20f))
+        assertEquals(0f, result.chapter.pages.last().trailingGapPx)
+    }
+
+    @Test
     fun `长章先回调覆盖目标偏移的页，再返回完整结果`() {
         // 300 字 = 20 行 → 2 页；notifyAfterChar=0 应在第一页封好时就回调
         val content = ChapterContent(listOf(ContentElement.Paragraph(cjk(300))))

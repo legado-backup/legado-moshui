@@ -16,7 +16,7 @@ import okhttp3.Request
 /** 网络书的阅读数据源：磁盘缓存优先，未命中走书源引擎抓取并落盘 */
 class NetReaderBookSource(
     private val bookId: String,
-    private val chapters: List<ChapterEntity>,
+    chapters: List<ChapterEntity>,
     private val rule: BookSourceRule,
     private val engine: BookSourceEngine,
     private val cache: ChapterContentCache,
@@ -24,14 +24,41 @@ class NetReaderBookSource(
     private val http: OkHttpClient = IMAGE_HTTP,
 ) : ReaderBookSource {
 
-    override val chapterCount: Int get() = chapters.size
-
-    /** 交给引擎作为正文翻页的止步集：翻到别的章节说明本章已完 */
-    private val chapterUrls: Set<String> by lazy {
-        chapters.mapNotNullTo(HashSet()) { it.url }
+    /**
+     * 目录 + 由它派生的 URL 止步集，成对换（一个 volatile 引用，读的人不会拿到「新目录配旧止步集」）。
+     *
+     * 从前进书时拍一张快照就再也不动：阅读中后台追更换了目录（插入公告章、补上新章），目录面板读的是库里的
+     * 新目录，这里还按旧的那张取章 —— 新章点了没反应，插入点之后点第 i 章打开的是旧目录的第 i 章。
+     * 现在由阅读页在目录变化时 [updateChapters]，序号与目录面板始终是同一套。
+     */
+    private class Toc(val chapters: List<ChapterEntity>) {
+        /** 交给引擎作为正文翻页的止步集：翻到别的章节说明本章已完 */
+        val urls: Set<String> by lazy { chapters.mapNotNullTo(HashSet()) { it.url } }
     }
 
-    override fun chapterTitle(index: Int): String? = chapters.getOrNull(index)?.title
+    @Volatile
+    private var toc = Toc(chapters)
+
+    /** 当前这份目录（序号 = 下标）。阅读页拿它和库里的新目录比对、按章节 URL 重新对位 */
+    val chapters: List<ChapterEntity> get() = toc.chapters
+
+    fun updateChapters(chapters: List<ChapterEntity>) {
+        toc = Toc(chapters)
+    }
+
+    /**
+     * 换源进行中：抓到的正文照常交给阅读页显示，但**不落盘、不打已缓存标记**。
+     *
+     * 换源会先清掉整本书的正文缓存再写新目录。这期间用户关掉面板接着翻，正文还是走这个旧源抓的 ——
+     * 落了盘，清缓存之后它就成了新目录里的「已缓存」：两个书源规则抓同一个站点时 URL 一模一样，
+     * 换源多半就是嫌旧规则抓出来的正文不对，结果新源读到的还是旧规则那份。换源失败则由阅读页恢复写入。
+     */
+    @Volatile
+    var cacheWritesHeld: Boolean = false
+
+    override val chapterCount: Int get() = toc.chapters.size
+
+    override fun chapterTitle(index: Int): String? = toc.chapters.getOrNull(index)?.title
 
     /**
      * 同一章同时只抓一次（按章节 URL 合并）。
@@ -43,7 +70,8 @@ class NetReaderBookSource(
     private val loads = SingleFlight<String, ChapterContent>(Dispatchers.IO)
 
     override suspend fun loadChapter(index: Int): ChapterContent {
-        val chapter = chapters.getOrNull(index) ?: error("章节不存在: $index")
+        val toc = toc
+        val chapter = toc.chapters.getOrNull(index) ?: error("章节不存在: $index")
         val url = chapter.url ?: error("章节缺少地址")
         // 缓存以章节 URL 为 key：目录变动后序号会错位，按序号读会读出别的章节。
         // 读盘（含 MD5 计算）切到 IO：阅读器在主线程调用，翻章时别拿它掉帧。
@@ -51,37 +79,48 @@ class NetReaderBookSource(
         return loads.run(url) {
             // 目录阶段 @put 存的变量随章节一起落了库，这里喂回给正文规则的 @get
             val remote = engine.getContent(
-                rule, url, chapterUrls,
+                rule, url, toc.urls,
                 chapterVariable = chapter.variable,
                 chapterTitle = chapter.title.orEmpty(),
                 chapterIndex = index,
             )
             val content = ChapterContent(remote.elements)
-            withContext(Dispatchers.IO) {
-                cache.write(bookId, url, content)
-                chapterDao.markCached(bookId, index, true)
-            }
+            store(index, url, content)
             content
         }
     }
 
     override suspend fun prefetchChapter(index: Int) {
-        val chapter = chapters.getOrNull(index) ?: return
+        val toc = toc
+        val chapter = toc.chapters.getOrNull(index) ?: return
         val url = chapter.url ?: return
         withContext(Dispatchers.IO) { cache.read(bookId, url) }?.let { return }
         // 预取禁止 JS 渲染：WebView 只能在主线程跑，翻页/卷页跟手会被 Chromium 抢走。
         // 静态抓不到就放弃，等用户真翻到这一章再走 loadChapter 的渲染回退。
         val remote = engine.getContent(
-            rule, url, chapterUrls,
+            rule, url, toc.urls,
             chapterVariable = chapter.variable,
             allowJsRender = false,
             chapterTitle = chapter.title.orEmpty(),
             chapterIndex = index,
         )
-        val content = ChapterContent(remote.elements)
+        store(index, url, ChapterContent(remote.elements))
+    }
+
+    /**
+     * 落盘 + 在目录里标「已缓存」。
+     *
+     * 标记按章节 URL 认行，而不是信传进来的序号：抓一章要好几秒，这期间后台追更可能已经整本换过目录 ——
+     * 旧序号上躺着的是另一章，打错了标记，目录里没缓存的章亮着、缓存了的反倒灭着。
+     * 先看库里这个序号上是不是还是这一章（绝大多数时候是，一次主键查询），对不上才整本找一遍。
+     */
+    private suspend fun store(index: Int, url: String, content: ChapterContent) {
+        if (cacheWritesHeld) return
         withContext(Dispatchers.IO) {
             cache.write(bookId, url, content)
-            chapterDao.markCached(bookId, index, true)
+            val row = if (chapterDao.get(bookId, index)?.url == url) index
+            else chapterDao.getByBook(bookId).firstOrNull { it.url == url }?.index
+            if (row != null) chapterDao.markCached(bookId, row, true)
         }
     }
 

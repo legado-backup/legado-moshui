@@ -14,9 +14,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -34,7 +36,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.radium.inkwell.reader.paginate.LayoutSpec
 import com.radium.inkwell.ui.components.Dimens
@@ -53,7 +54,8 @@ fun PageInfoBar(pageUi: ReaderPageUi, session: ReaderSessionUi, spec: LayoutSpec
     val footerColor = remember(session.settings.theme.footerColor) {
         Color(session.settings.theme.footerColor)
     }
-    val footerNumStyle = remember { TextStyle(fontSize = FOOTER_SP, fontFeatureSettings = "tnum") }
+    val footerStyle = pageInfoTextStyle()
+    val footerNumStyle = remember(footerStyle) { footerStyle.copy(fontFeatureSettings = "tnum") }
     val showBattery = session.settings.showBattery
 
     var time by remember { mutableStateOf(currentTime()) }
@@ -119,7 +121,7 @@ fun PageInfoBar(pageUi: ReaderPageUi, session: ReaderSessionUi, spec: LayoutSpec
                 .align(Alignment.TopStart)
                 .padding(start = marginH, end = marginH, top = headerTop),
             color = footerColor,
-            fontSize = FOOTER_SP,
+            style = footerStyle,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -156,7 +158,16 @@ fun PageInfoBar(pageUi: ReaderPageUi, session: ReaderSessionUi, spec: LayoutSpec
     }
 }
 
-private val FOOTER_SP = 11.sp
+/**
+ * 页眉/页脚小字的样式：排版角色 bodySmall（12sp），正文性小字的下限。
+ *
+ * 从前裸写 11.sp，低于规范的 12sp 下限，也不跟排版令牌走。分页给页眉页脚预留的那两条带
+ * （ReaderScreen 的 buildLayoutSpec）按这里的行高兜底 —— 两边必须读同一个，否则调大系统字号后
+ * 页脚的字就压进正文里了。
+ */
+@Composable
+@ReadOnlyComposable
+internal fun pageInfoTextStyle(): TextStyle = MaterialTheme.typography.bodySmall
 
 /** 小电池图标：描边外框 + 正极触点 + 按电量填充 */
 @Composable

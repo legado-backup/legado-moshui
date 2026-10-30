@@ -32,6 +32,14 @@ data class PageSpec(
     /** 本页起始/结束字符在全章字符流中的偏移（end 为开区间） */
     val startCharOffset: Int,
     val endCharOffset: Int,
+    /**
+     * 本页最后一项之后、封页前已经垫上的留白（段距、分隔线的空行）。
+     *
+     * 翻页模式用不着它 —— 下一页从页顶重新起排。滚动模式却是把页首尾相接的：不补回来的话，
+     * 恰好在段尾断页的地方，上一段的末行和下一段的首行就贴在一起，比页内的段距窄一截，
+     * 读着像两段并成了一段。章末一页恒为 0：章与章之间有下一章标题的上间距隔着，不再叠一层段距。
+     */
+    val trailingGapPx: Float = 0f,
 )
 
 sealed interface PageItem {

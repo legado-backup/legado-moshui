@@ -20,6 +20,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,7 +64,11 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalFontFamilyResolver
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import com.radium.inkwell.ui.components.Dimens
 import androidx.compose.ui.unit.sp
@@ -83,12 +89,16 @@ import com.radium.inkwell.reader.measure.SystemFontRegistry
 import com.radium.inkwell.reader.paginate.LayoutSpec
 import com.radium.inkwell.util.KeyEventBus
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
 
 /** 自动换源提示条的停留时长：够看清并有机会撤销，又不至于长期挡住正文 */
 private const val AUTO_CHANGED_HINT_MS = 8_000L
+
+/** 纸面上一次性提示的停留时长 */
+private const val READER_TOAST_MS = 1_800L
 
 @Composable
 fun ReaderScreen(
@@ -153,9 +163,11 @@ fun ReaderScreen(
     // 这样正文页与卷页都铺满全屏，顶部不再留一条状态栏/挖孔高度的空带（卷页时会露出来）。
     val viewport = IntSize(windowSize.width, windowSize.height)
 
-    val spec = remember(viewport, session.settings, density, cutout) {
+    // 页眉页脚小字的行高：分页给那两条带的预留按它兜底（见 pageInfoTextStyle）
+    val infoLineHeight = pageInfoTextStyle().lineHeight
+    val spec = remember(viewport, session.settings, density, cutout, infoLineHeight) {
         if (viewport.width <= 0 || viewport.height <= 0) null
-        else buildLayoutSpec(viewport, session.settings, density, cutout)
+        else buildLayoutSpec(viewport, session.settings, density, cutout, infoLineHeight)
     }
 
     LaunchedEffect(spec) {
@@ -164,22 +176,8 @@ fun ReaderScreen(
         viewModel.onLayoutReady(facade, settled)
     }
 
-    // 音量键翻页（与点击共用动画路径）
-    LaunchedEffect(session.settings.volumeKeyFlip, overlay.menuVisible, session.settings.flipAnimation) {
-        // 滚动模式下没有"页"，音量键翻页无从谈起 —— 按下去只会把游标推到别处、把人转晕。
-        // 这个条件必须真的写进来，不能只把 flipAnimation 挂在 key 上：漏了的话滚动模式下
-        // MainActivity 照样把音量键吃掉，事件发到没人订阅的 flipController 上凭空消失 ——
-        // 既翻不了页，系统音量也调不了。
-        keyBus.volumeFlipEnabled = session.settings.volumeKeyFlip &&
-            !overlay.menuVisible &&
-            session.settings.flipAnimation != FlipAnimation.SCROLL
-    }
     LaunchedEffect(Unit) {
         keyBus.flipEvents.collect { flipController.requestFlip(it) }
-    }
-    // 自动翻页与音量键共用 FlipController，沿用用户选的仿真/覆盖/平移等效果
-    LaunchedEffect(Unit) {
-        viewModel.animatedFlipRequests.collect { flipController.requestFlip(it) }
     }
     DisposableEffect(Unit) {
         onDispose { keyBus.volumeFlipEnabled = false }
@@ -207,6 +205,36 @@ fun ReaderScreen(
     val scope = rememberCoroutineScope()
     var addShelfPrompt by remember { mutableStateOf(false) }
     var settlingShelf by remember { mutableStateOf(false) }
+
+    // 音量键翻页（与点击共用动画路径）。只在**真能翻**的时候吃掉音量键，其余时候放行给系统调音量：
+    // - 滚动模式下没有"页"，音量键翻页无从谈起 —— 按下去只会把游标推到别处、把人转晕。
+    //   这个条件必须真的写进来：漏了的话滚动模式下 MainActivity 照样把音量键吃掉，事件发到
+    //   没人订阅的 flipController 上凭空消失 —— 既翻不了页，系统音量也调不了。
+    // - 报错页、加载/进书 splash、自动换源进度页上根本没有翻页容器，同理会被凭空吃掉。
+    // - 选字中不翻：选区和工具条还亮着，底下那页翻走了，复制/净化拿到的是上一页的字。
+    // - 菜单、目录/设置面板、换源面板、加入书架确认开着时，与翻页手势同一套开关。
+    val volumeFlip = session.settings.volumeKeyFlip &&
+        session.settings.flipAnimation != FlipAnimation.SCROLL &&
+        !overlay.menuVisible &&
+        !overlay.readerSheetOpen &&
+        overlay.sourceCandidates == null &&
+        !overlay.autoChanging &&
+        pageUi.error == null &&
+        !pageUi.loading &&
+        spec != null &&
+        selection == null &&
+        !addShelfPrompt
+    LaunchedEffect(volumeFlip) { keyBus.volumeFlipEnabled = volumeFlip }
+
+    // 选字期间自动翻页暂停：ViewModel 停表（松手后重新计满一个间隔再翻，不会一取消选区就立刻跳页），
+    // 这里再拦一道 —— 万一请求已经在路上，也别在选区底下把页翻走
+    LaunchedEffect(selection != null) { viewModel.setSelectionActive(selection != null) }
+    // 自动翻页与音量键共用 FlipController，沿用用户选的仿真/覆盖/平移等效果
+    LaunchedEffect(Unit) {
+        viewModel.animatedFlipRequests.collect {
+            if (selection == null) flipController.requestFlip(it)
+        }
+    }
 
     // 预览直读还没上架：退出先问要不要加入，而不是默默留在书架上。
     val requestExit: () -> Unit = {
@@ -566,24 +594,41 @@ fun ReaderScreen(
             )
         }
 
-        val lastToast = remember { mutableStateOf("") }
-        overlay.toast?.let { msg ->
-            lastToast.value = msg
-            LaunchedEffect(msg) {
-                kotlinx.coroutines.delay(1800)
-                viewModel.clearToast()
+        // 一次性提示（建了净化规则、换源失败、本章未净化……）。
+        // 从 SharedFlow 收，不是从 StateFlow 字段读：后者对相同值去重，连着两次同样的提示第二次直接没了。
+        // collectLatest：新提示来了直接替换正在显示的那条，重新计时，不排队（同 CollectMessages）。
+        // 外层常驻、挂 liveRegion：读屏用户看不见这行字，内容一变 TalkBack 就念出来；
+        // key(序号) 让同一句话再来一次时也是个新节点，照样会念。
+        var toastText by remember { mutableStateOf("") }
+        var toastSeq by remember { mutableIntStateOf(0) }
+        var toastVisible by remember { mutableStateOf(false) }
+        LaunchedEffect(viewModel) {
+            viewModel.messages.collectLatest { msg ->
+                toastText = msg
+                toastSeq++
+                toastVisible = true
+                delay(READER_TOAST_MS)
+                toastVisible = false
             }
         }
-        AnimatedVisibility(
-            visible = overlay.toast != null,
-            enter = scrimEnter(),
-            exit = scrimExit(),
-            modifier = Modifier.align(Alignment.TopCenter).padding(top = Dimens.touchTarget),
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = Dimens.touchTarget)
+                .semantics { liveRegion = LiveRegionMode.Polite },
         ) {
-            Text(
-                lastToast.value,
-                color = Color(session.settings.theme.footerColor),
-            )
+            AnimatedVisibility(
+                visible = toastVisible,
+                enter = scrimEnter(),
+                exit = scrimExit(),
+            ) {
+                key(toastSeq) {
+                    Text(
+                        toastText,
+                        color = Color(session.settings.theme.footerColor),
+                    )
+                }
+            }
         }
 
         // 常驻组合，可见性交给 AnimatedVisibility —— 否则退场动画根本没机会播
@@ -670,8 +715,11 @@ private fun buildLayoutSpec(
     settings: ReaderSettings,
     density: androidx.compose.ui.unit.Density,
     cutout: IntInsets,
+    infoLineHeight: TextUnit,
 ): LayoutSpec = with(density) {
     val fontSizePx = settings.fontSizeSp.sp.toPx()
+    // 页眉页脚小字一行的高度（随系统字号缩放）。不是 sp（主题里被改成 em/未指定）就只按下面的 dp 兜底
+    val infoLinePx = if (infoLineHeight.isSp) infoLineHeight.toPx() else 0f
     // 挖孔折进边距：视口铺满全屏，靠加大这一侧的留白把页眉/正文推开摄像头，而不是把整页缩进去。
     LayoutSpec(
         viewportWidthPx = viewport.width,
@@ -685,8 +733,11 @@ private fun buildLayoutSpec(
         // 正文首行落在 marginTop + headerHeight，而页眉章节名画在 marginTop —— 两者的间距就是
         // headerHeight 减去页眉字高。18dp 里塞进 11sp 的章节名后只剩 ~4dp，比段间距还窄，
         // 页眉像贴在正文上。抬到 26dp，让页眉与正文拉开一个不小于段间距的舒服距离。
-        headerHeightPx = 26.dp.toPx(),
-        footerHeightPx = 18.dp.toPx(),
+        //
+        // 页眉页脚的字走排版令牌（bodySmall，见 pageInfoTextStyle），会跟着系统字号放大：放大到行高
+        // 超出这两条带时，带子跟着撑开，字才不会压进正文。默认字号下行高 16sp，两条带仍是 26/18dp，排版不变。
+        headerHeightPx = maxOf(26.dp.toPx(), infoLinePx + Dimens.gapS.toPx()),
+        footerHeightPx = maxOf(18.dp.toPx(), infoLinePx),
         fontSizePx = fontSizePx,
         lineHeightPx = fontSizePx * settings.lineSpacingMult,
         paragraphSpacingPx = fontSizePx * settings.paragraphSpacingEm,

@@ -67,9 +67,9 @@ class Paginator(private val measurer: TextMeasureFacade) {
             complete,
         )
 
-        fun seal() {
+        fun sealPage(endOfChapter: Boolean) {
             if (!cursor.isEmpty) {
-                pages += cursor.seal(chapterIndex, pages.size)
+                pages += cursor.seal(chapterIndex, pages.size, keepTrailingGap = !endOfChapter)
                 cursor = PageCursor(spec)
                 // 目标偏移已经落在已封页里 → 先让 UI 出这一屏，余下继续排
                 if (partialCb != null && !partialEmitted && notifyAfterChar < pages.last().endCharOffset) {
@@ -78,6 +78,9 @@ class Paginator(private val measurer: TextMeasureFacade) {
                 }
             }
         }
+
+        /** 章内断页：页尾垫上的段距要记着，滚动模式拼页时补回来（见 [PageSpec.trailingGapPx]） */
+        fun seal() = sealPage(endOfChapter = false)
 
         elements.forEachIndexed { idx, element ->
             when (element) {
@@ -123,7 +126,7 @@ class Paginator(private val measurer: TextMeasureFacade) {
                 }
             }
         }
-        seal()
+        sealPage(endOfChapter = true)
         if (pages.isEmpty()) {
             // 空章节兜底：产出一个空页，游标语义不塌
             pages += PageSpec(chapterIndex, 0, emptyList(), 0, 0)
@@ -245,6 +248,8 @@ class Paginator(private val measurer: TextMeasureFacade) {
 internal class PageCursor(private val spec: LayoutSpec) {
     private val items = mutableListOf<PageItem>()
     private var usedHeight = 0f
+    /** 最后一项的底边。usedHeight 比它多出来的那截，就是页尾垫上的段距 */
+    private var contentBottom = 0f
     private var startChar = -1
     private var endChar = 0
 
@@ -272,6 +277,7 @@ internal class PageCursor(private val spec: LayoutSpec) {
         val height = mp.lineBottom(endLine) - mp.lineTop(startLine)
         items += PageItem.TextSlice(elementIndex, startLine, endLine, usedHeight, height, isTitle)
         usedHeight += height
+        contentBottom = usedHeight
         val sliceStart = elementCharBase + mp.lineStartOffset(startLine)
         val sliceEnd = elementCharBase + mp.lineEndOffset(endLine)
         if (startChar < 0) startChar = sliceStart
@@ -282,6 +288,7 @@ internal class PageCursor(private val spec: LayoutSpec) {
         val left = (spec.contentWidthPx - width) / 2f
         items += PageItem.ImageBox(elementIndex, resourceId, left, usedHeight, width, height)
         usedHeight += height
+        contentBottom = usedHeight
         if (startChar < 0) startChar = elementCharBase
         endChar = maxOf(endChar, elementCharBase + 1)
     }
@@ -303,8 +310,12 @@ internal class PageCursor(private val spec: LayoutSpec) {
         if (items.isNotEmpty()) endChar = maxOf(endChar, offset)
     }
 
-    fun seal(chapterIndex: Int, pageIndex: Int): PageSpec =
-        PageSpec(chapterIndex, pageIndex, items.toList(), startChar.coerceAtLeast(0), endChar)
+    /** [keepTrailingGap] 章末一页传 false：见 [PageSpec.trailingGapPx] */
+    fun seal(chapterIndex: Int, pageIndex: Int, keepTrailingGap: Boolean = true): PageSpec =
+        PageSpec(
+            chapterIndex, pageIndex, items.toList(), startChar.coerceAtLeast(0), endChar,
+            trailingGapPx = if (keepTrailingGap) (usedHeight - contentBottom).coerceAtLeast(0f) else 0f,
+        )
 
     private companion object {
         const val EPSILON = 0.5f

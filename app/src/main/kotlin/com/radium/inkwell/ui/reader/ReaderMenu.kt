@@ -40,7 +40,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
+import com.radium.inkwell.ui.components.SecondaryButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -564,23 +564,28 @@ private fun TypographyPanel(
 
 @Composable
 private fun LayoutTab(settings: ReaderSettings, onUpdate: (ReaderSettings) -> Unit) {
-    // 字号：加减按钮 + 当前值，一行搞定
+    // 字号：加减按钮 + 当前值，一行搞定。
+    // 走 SecondaryButton 而不是裸 OutlinedButton：后者落到不带 shapes 的旧重载，按下去没有 Expressive 的
+    // 圆角形变，和面板里其他按钮不是一套手感；触控区仍由 M3 按钮自带的 48dp 下限兜着。
+    // 「A−」读屏只会念成「A 减」，补一个说清用途的名字
     SectionLabel("字号")
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        OutlinedButton(
+        SecondaryButton(
+            text = "A−",
             onClick = { if (settings.fontSizeSp > 12f) onUpdate(settings.copy(fontSizeSp = settings.fontSizeSp - 1)) },
-            modifier = Modifier.weight(1f),
-        ) { Text("A−", style = MaterialTheme.typography.titleMedium) }
+            modifier = Modifier.weight(1f).semantics { contentDescription = "字号减小" },
+        )
         Text(
             "${settings.fontSizeSp.toInt()}",
             Modifier.width(72.dp),
             textAlign = TextAlign.Center,
             style = MaterialTheme.typography.titleLarge,
         )
-        OutlinedButton(
+        SecondaryButton(
+            text = "A＋",
             onClick = { if (settings.fontSizeSp < 32f) onUpdate(settings.copy(fontSizeSp = settings.fontSizeSp + 1)) },
-            modifier = Modifier.weight(1f),
-        ) { Text("A＋", style = MaterialTheme.typography.titleMedium) }
+            modifier = Modifier.weight(1f).semantics { contentDescription = "字号增大" },
+        )
     }
 
     SectionLabel("标题字号")

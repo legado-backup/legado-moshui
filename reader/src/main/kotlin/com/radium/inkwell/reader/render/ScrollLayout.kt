@@ -81,7 +81,8 @@ fun flattenPagesForScroll(pages: List<PageSpec>): List<PageItem> {
             out += item.shiftY(yBase - origin)
         }
         val bottom = page.items.maxOf { it.yTop() + it.height() }
-        yBase += (bottom - origin)
+        // 页尾段距一并接上：只量到末行的底，段尾断页处两段就贴在一起（见 PageSpec.trailingGapPx）
+        yBase += (bottom - origin) + page.trailingGapPx
     }
     return out
 }

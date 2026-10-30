@@ -20,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -40,6 +41,7 @@ import kotlin.math.abs
 import com.radium.inkwell.reader.api.FlipAnimation
 import com.radium.inkwell.reader.api.FlipDirection
 import com.radium.inkwell.reader.api.ReaderTheme
+import com.radium.inkwell.reader.measure.MeasuredParagraph
 import com.radium.inkwell.reader.paginate.LayoutSpec
 import com.radium.inkwell.reader.paginate.PageSpec
 import com.radium.inkwell.reader.render.PageCanvas
@@ -52,6 +54,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -261,8 +265,16 @@ fun PageFlipContainer(
     // 阅读中把仿真换成滑动、或系统关掉动画后，音量键与自动翻页仍按旧类型跑。
     // 经 rememberUpdatedState 取最新，与下面 pointerInput 里读到的保持同一帧。
     val programmaticFlip by rememberUpdatedState<(FlipDirection) -> Unit> { startProgrammaticFlip(it) }
+    val selectionLatest = rememberUpdatedState(selection)
     LaunchedEffect(controller) {
-        controller.requests.collect { programmaticFlip(it) }
+        controller.requests.collect { dir ->
+            // 选字中不接程序化翻页（音量键、自动翻页、菜单上的滑动翻页）。拖拽/点按手势早就因为选区停了，
+            // 这条路从前却不看：选区和工具条还亮着，底下那页先翻走了，「复制」「净化」拿到的是上一页的字。
+            // 这里**不**看 gesturesEnabled —— 菜单上滑动翻页是先关菜单再发请求，请求到的那一刻
+            // gesturesEnabled 还没跟上，按它拦就把这一下吞了。
+            if (selectionLatest.value != null) return@collect
+            programmaticFlip(dir)
+        }
     }
     LaunchedEffect(gesturesEnabled) {
         if (!gesturesEnabled) interruptSettle()
@@ -557,26 +569,46 @@ private fun CurlLayer(
     selection: TextSelection? = null,
 ) {
     // 闲时也预渲，但放到 Default：主线程不再被 remember { renderPageBitmap } 卡住。
-    // 位图是不可变 ARGB（见 renderPageBitmap）。按 PageSpec 相等判断能否环形挪槽，
+    // 位图是不可变 ARGB（见 renderPageBitmap）。哪一页的旧图还对得上就原样留用，
     // 换下来的旧图延后 recycle，避免正画着的那一帧被回收。
     var bitmaps by remember { mutableStateOf<CurlBitmaps?>(null) }
     DisposableEffect(Unit) {
         onDispose { bitmaps?.recycleAll() }
     }
-    LaunchedEffect(current?.spec, prev?.spec, next?.spec, layout, theme, density) {
-        val old = bitmaps
-        val produced = withContext(Dispatchers.Default + NonCancellable) {
-            shiftOrRender(old, current, prev, next, layout, theme, density)
-        }
-        if (!isActive) {
-            // 没交出去：只回收相对 old 新渲的那几张，共用槽不能动
-            produced.recycleFresh(old)
-            return@LaunchedEffect
-        }
-        bitmaps = produced
-        // 新图已经交给状态；等两帧再 recycle 卸下来的槽，Canvas 不会画到已回收的 Bitmap
-        kotlinx.coroutines.delay(32)
-        old?.recycleUnused(produced)
+    // 一条常驻的渲染循环，最新的请求说了算。
+    //
+    // 从前是 LaunchedEffect(页, 版式, 纸张) —— 每变一次就起一轮，而每轮都在 NonCancellable 里烤满三张：
+    // 被取代的那轮照样跑完，只是交不出去。拖进度条、拖自定义纸色时一秒几十次变化，Default 上就堆着
+    // 几十轮全屏 ARGB（一张 10~20MB）并行在烤，内存冲高、真正要的那一轮反而排在最后。
+    // 现在同一时刻只烤一轮；烤的时候来的请求 conflate 成最新的一个，烤完再接着烤它，中间的全部跳过。
+    //
+    // 正在烤的那一轮仍然 NonCancellable：渲染本身没有挂起点，取消也停不下来，取消只会让 withContext
+    // 把结果扔掉 —— 新渲出来的位图就没人 recycle 了。烤完总能拿到结果，要么交出去、要么回收。
+    val request = CurlRequest(current, prev, next, layout, theme, density)
+    val latestRequest = rememberUpdatedState(request)
+    LaunchedEffect(Unit) {
+        snapshotFlow { latestRequest.value }
+            .distinctUntilChanged { a, b -> a.sameContent(b) }
+            .conflate()
+            .collect { req ->
+                val old = bitmaps
+                val produced = withContext(Dispatchers.Default + NonCancellable) {
+                    renderCurlBitmaps(old, req)
+                }
+                if (produced === old) return@collect
+                if (!isActive) {
+                    // 没交出去：只回收相对 old 新渲的那几张，共用槽不能动
+                    produced.recycleFresh(old)
+                    return@collect
+                }
+                bitmaps = produced
+                // 新图已经交给状态；等两帧再 recycle 卸下来的槽，Canvas 不会画到已回收的 Bitmap。
+                // 这段等待也不许取消：被掐掉的话，卸下来的那几张就再也没人回收了
+                withContext(NonCancellable) {
+                    kotlinx.coroutines.delay(32)
+                    old?.recycleUnused(produced)
+                }
+            }
     }
     if (size.width <= 1 || size.height <= 1) {
         PageCanvas(current, layout, theme, selection = selection)
@@ -584,31 +616,21 @@ private fun CurlLayer(
     }
     val renderer = remember(size) { CurlRenderer(size.width.toFloat(), size.height.toFloat()) }
 
-    val ready = bitmaps
     if (direction == null) {
         PageCanvas(current, layout, theme, selection = selection)
         return
     }
-    // 页图还在 Default 上烤：先平移跟手，避免画面冻住像滑不动。
-    if (ready?.current == null) {
+    // 手里的位图必须正是**眼前这几页**：连翻、跳目录、拖进度、改字号/纸色之后，新图还在 Default 上烤，
+    // 这份可能还是上一页的。从前只看「有没有」不看「是不是」，卷起来的就是刚翻过去的那页，
+    // 几帧之后才突然换成对的。对不上就先平移跟手（画面不冻住、也不画错页），等新图交上来再卷。
+    val pair = bitmaps?.curlPair(direction, request)
+    if (pair == null) {
         SlideLayers(
             selection, current, prev, next, layout, theme, direction, offset, size.width.toFloat(),
         )
         return
     }
-
-    val front: android.graphics.Bitmap
-    val under: android.graphics.Bitmap
-    when (direction) {
-        FlipDirection.FORWARD -> {
-            front = ready.current
-            under = ready.next ?: ready.blank
-        }
-        FlipDirection.BACKWARD -> {
-            front = ready.prev ?: ready.blank
-            under = ready.current
-        }
-    }
+    val (front, under) = pair
 
     Spacer(
         Modifier.fillMaxSize().drawBehind {
@@ -631,63 +653,73 @@ private fun CurlLayer(
 }
 
 /**
- * 能挪槽就挪：前翻时 prev←current、current←next，只渲新的 next。
- * 对不上（跳章、改主题）才三张全渲。blank 只在纸色/尺寸变时重做。
+ * 一张卷页位图画的是哪一页。
+ *
+ * 光比 [PageSpec] 不够：改了净化规则后重排，同一页的 spec 可能一模一样（行数、偏移都没变），字却换过了。
+ * 那时 measured 一定是新的一份（每次分页都新建），所以再按引用比一次 measured。
+ * 同一份分页结果里的页共用同一个 measured，翻页挪槽时照样认得出来。
  */
-private fun shiftOrRender(
-    old: CurlBitmaps?,
-    current: RenderablePage?,
-    prev: RenderablePage?,
-    next: RenderablePage?,
-    layout: LayoutSpec,
-    theme: ReaderTheme,
-    density: androidx.compose.ui.unit.Density,
-): CurlBitmaps {
-    val curSpec = current?.spec
-    val prevSpec = prev?.spec
-    val nextSpec = next?.spec
-    val themeKey = theme.background xor theme.textColor
-    val canReuseBlank = old != null && old.layout == layout && old.themeKey == themeKey
-    val blank = if (canReuseBlank) old.blank else renderPageAndroidBitmap(null, layout, theme, density)
+private class CurlPageKey(val spec: PageSpec, val measured: Map<Int, MeasuredParagraph>) {
+    override fun equals(other: Any?): Boolean =
+        other is CurlPageKey && other.measured === measured && other.spec == spec
 
-    if (old != null && curSpec != null && curSpec == old.nextSpec) {
-        // 前翻一页：旧 next 变成当前
-        return CurlBitmaps(
-            current = old.next,
-            prev = old.current,
-            next = next?.let { renderPageAndroidBitmap(it, layout, theme, density) },
-            blank = blank,
-            currentSpec = curSpec,
-            prevSpec = prevSpec,
-            nextSpec = nextSpec,
-            layout = layout,
-            themeKey = themeKey,
-        )
+    override fun hashCode(): Int = spec.hashCode()
+}
+
+private fun RenderablePage.curlKey() = CurlPageKey(spec, measured)
+
+private fun RenderablePage?.matches(key: CurlPageKey?): Boolean =
+    if (this == null) key == null else key == curlKey()
+
+/** 渲染循环的一份输入。页面对象每次出页都是新建的，比较时按 [CurlPageKey] 比，不按引用 */
+private class CurlRequest(
+    val current: RenderablePage?,
+    val prev: RenderablePage?,
+    val next: RenderablePage?,
+    val layout: LayoutSpec,
+    val theme: ReaderTheme,
+    val density: androidx.compose.ui.unit.Density,
+) {
+    fun sameContent(other: CurlRequest): Boolean =
+        layout == other.layout && theme == other.theme && density == other.density &&
+            current.matches(other.current?.curlKey()) &&
+            prev.matches(other.prev?.curlKey()) &&
+            next.matches(other.next?.curlKey())
+}
+
+/**
+ * 能留用就留用：三页里哪一页的旧图还对得上（前翻后的 prev←current、current←next，
+ * 拖进度条时没动的邻页……），就直接搬过来，只渲真正新出现的那几页。
+ * 版式、纸张、密度变了则一张都用不上 —— 字的位置、颜色、像素全不一样。blank 同理。
+ * 什么都没变时原样返回 [old]，调用方据此跳过提交。
+ */
+private fun renderCurlBitmaps(old: CurlBitmaps?, req: CurlRequest): CurlBitmaps {
+    val reusable = old?.takeIf {
+        it.layout == req.layout && it.theme == req.theme && it.density == req.density
     }
-    if (old != null && curSpec != null && curSpec == old.prevSpec) {
-        // 后翻一页：旧 prev 变成当前
-        return CurlBitmaps(
-            current = old.prev,
-            prev = prev?.let { renderPageAndroidBitmap(it, layout, theme, density) },
-            next = old.current,
-            blank = blank,
-            currentSpec = curSpec,
-            prevSpec = prevSpec,
-            nextSpec = nextSpec,
-            layout = layout,
-            themeKey = themeKey,
-        )
+    if (reusable != null &&
+        req.current.matches(reusable.currentKey) &&
+        req.prev.matches(reusable.prevKey) &&
+        req.next.matches(reusable.nextKey)
+    ) {
+        return reusable
+    }
+    fun obtain(page: RenderablePage?): android.graphics.Bitmap? {
+        if (page == null) return null
+        reusable?.bitmapFor(page.curlKey())?.let { return it }
+        return renderPageAndroidBitmap(page, req.layout, req.theme, req.density)
     }
     return CurlBitmaps(
-        current = current?.let { renderPageAndroidBitmap(it, layout, theme, density) },
-        prev = prev?.let { renderPageAndroidBitmap(it, layout, theme, density) },
-        next = next?.let { renderPageAndroidBitmap(it, layout, theme, density) },
-        blank = blank,
-        currentSpec = curSpec,
-        prevSpec = prevSpec,
-        nextSpec = nextSpec,
-        layout = layout,
-        themeKey = themeKey,
+        current = obtain(req.current),
+        prev = obtain(req.prev),
+        next = obtain(req.next),
+        blank = reusable?.blank ?: renderPageAndroidBitmap(null, req.layout, req.theme, req.density),
+        currentKey = req.current?.curlKey(),
+        prevKey = req.prev?.curlKey(),
+        nextKey = req.next?.curlKey(),
+        layout = req.layout,
+        theme = req.theme,
+        density = req.density,
     )
 }
 
@@ -708,12 +740,43 @@ private class CurlBitmaps(
     val prev: android.graphics.Bitmap?,
     val next: android.graphics.Bitmap?,
     val blank: android.graphics.Bitmap,
-    val currentSpec: PageSpec?,
-    val prevSpec: PageSpec?,
-    val nextSpec: PageSpec?,
+    val currentKey: CurlPageKey?,
+    val prevKey: CurlPageKey?,
+    val nextKey: CurlPageKey?,
     val layout: LayoutSpec,
-    val themeKey: Long,
+    val theme: ReaderTheme,
+    val density: androidx.compose.ui.unit.Density,
 ) {
+    fun bitmapFor(key: CurlPageKey): android.graphics.Bitmap? = when (key) {
+        currentKey -> current
+        prevKey -> prev
+        nextKey -> next
+        else -> null
+    }
+
+    /**
+     * 这一刀要卷的「上层 / 底层」两张图；手里的图不是 [req] 里这几页（或版式/纸张已变）时返回 null。
+     * 前翻卷走当前页、底下露出下一页；后翻是上一页卷回来盖住当前页。邻页还没排好时底层用空白纸。
+     */
+    fun curlPair(
+        direction: FlipDirection,
+        req: CurlRequest,
+    ): Pair<android.graphics.Bitmap, android.graphics.Bitmap>? {
+        if (layout != req.layout || theme != req.theme || density != req.density) return null
+        val cur = current ?: return null
+        if (!req.current.matches(currentKey)) return null
+        return when (direction) {
+            FlipDirection.FORWARD -> {
+                if (!req.next.matches(nextKey)) return null
+                cur to (next ?: blank)
+            }
+            FlipDirection.BACKWARD -> {
+                if (!req.prev.matches(prevKey)) return null
+                (prev ?: blank) to cur
+            }
+        }
+    }
+
     fun recycleAll() {
         recycleBitmap(current)
         recycleBitmap(prev)

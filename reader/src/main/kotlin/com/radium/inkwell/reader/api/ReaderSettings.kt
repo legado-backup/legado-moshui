@@ -80,6 +80,9 @@ enum class FlipAnimation(val label: String) {
  * 每一款的正文对比度都 **≥ 7:1（WCAG AAA）**，不是 4.5:1 就算过 —— 阅读器上一坐就是一小时，
  * AA 那条线是给「看一眼就走」的界面定的。ReaderThemeContrastTest 会把这条线钉死，
  * 以后再加主题，配色不合格直接测试挂掉，而不是等用户读得眼睛疼。
+ *
+ * 页眉页脚、提示这类小字（[footerColor]、[secondaryTextColor]）弱于正文，但也得 **≥ 4.5:1（AA）**：
+ * 它们是 11~12sp 的小字，比正文更吃对比度。从前页脚色是凭眼缘挑的，暖纸、夜色一档只有 3.4:1 上下。
  */
 data class ReaderTheme(
     val id: String,
@@ -88,31 +91,48 @@ data class ReaderTheme(
     val background: Long,
     val textColor: Long,
     val titleColor: Long,
+    /** 页眉章节名、页脚页码/时间，以及纸面上的提示小字。预设值都是「够 4.5:1 的前提下尽量往纸色靠」挑的 */
     val footerColor: Long,
     val isDark: Boolean = false,
 ) {
+    /**
+     * 阅读页浮层里的次要文字（面板副标题、说明、计数），即 ReaderThemeScope 的 onSurfaceVariant。
+     *
+     * 从前是「正文色 × 0.7 透明度」一刀切：浅纸上还行，深色纸（夜色、墨蓝、纯黑）和偏黄的宣纸、牛皮上
+     * 只剩 3.9~4.2:1，小字读起来发虚。现在仍从「往纸色退三成」出发，只在不够 4.5:1 的主题上少退一点 ——
+     * 够线的主题颜色与从前一模一样（半透明叠在纸上与这里的不透明混色是同一个值）。
+     */
+    val secondaryTextColor: Long
+        get() = readableBlend(textColor, background, SECONDARY_TEXT_FADE)
+
     companion object {
+        /** 小字（页脚、提示、面板次要文字）的对比度下限：WCAG AA */
+        const val MIN_SMALL_TEXT_CONTRAST = 4.5
+
+        /** 次要文字往纸色退多少（= 从前 0.7 透明度的另一种写法） */
+        private const val SECONDARY_TEXT_FADE = 0.3f
+
         // ---- 浅色纸 ----
         /** 默认。微暖的米，长时间读不刺眼，也是 App 的品牌底色 */
-        val PAPER = ReaderTheme("paper", "暖纸", 0xFFF5EFDC, 0xFF3A3226, 0xFF2A2418, 0xFF8A8069)
-        val WHITE = ReaderTheme("white", "净白", 0xFFFFFFFF, 0xFF212121, 0xFF111111, 0xFF8A8A8A)
+        val PAPER = ReaderTheme("paper", "暖纸", 0xFFF5EFDC, 0xFF3A3226, 0xFF2A2418, 0xFF736A56)
+        val WHITE = ReaderTheme("white", "净白", 0xFFFFFFFF, 0xFF212121, 0xFF111111, 0xFF757575)
         /** 比暖纸更黄，接近宣纸；夜里开小灯看不容易累 */
-        val RICE = ReaderTheme("rice", "宣纸", 0xFFF2E8D5, 0xFF4A3F30, 0xFF362D20, 0xFF857A62)
+        val RICE = ReaderTheme("rice", "宣纸", 0xFFF2E8D5, 0xFF4A3F30, 0xFF362D20, 0xFF716651)
         /** 更深的旧纸色，白天强光下反光最轻 */
-        val KRAFT = ReaderTheme("kraft", "牛皮", 0xFFE4D3B0, 0xFF413425, 0xFF2E2417, 0xFF7D6F55)
-        val GREEN = ReaderTheme("green", "青竹", 0xFFCCE8CF, 0xFF2E4033, 0xFF1F2E23, 0xFF5F7A66)
+        val KRAFT = ReaderTheme("kraft", "牛皮", 0xFFE4D3B0, 0xFF413425, 0xFF2E2417, 0xFF675943)
+        val GREEN = ReaderTheme("green", "青竹", 0xFFCCE8CF, 0xFF2E4033, 0xFF1F2E23, 0xFF506856)
         /** 中性灰，一点黄都不带 —— 有人就是觉得暖色纸「脏」 */
-        val STONE = ReaderTheme("stone", "灰岩", 0xFFE9E7E2, 0xFF33302B, 0xFF23211D, 0xFF87847D)
+        val STONE = ReaderTheme("stone", "灰岩", 0xFFE9E7E2, 0xFF33302B, 0xFF23211D, 0xFF696660)
         /** 微暖的本白纸，正文墨绿灰 —— 比暖纸更素净、比净白更耐看 */
-        val IVORY = ReaderTheme("ivory", "象牙", 0xFFEEECDF, 0xFF3C3A2E, 0xFF323026, 0xFF838174)
+        val IVORY = ReaderTheme("ivory", "象牙", 0xFFEEECDF, 0xFF3C3A2E, 0xFF323026, 0xFF6B695D)
 
         // ---- 深色纸 ----
-        val NIGHT = ReaderTheme("night", "夜色", 0xFF121212, 0xFFA3A3A3, 0xFFC4C4C4, 0xFF6B6B6B, isDark = true)
+        val NIGHT = ReaderTheme("night", "夜色", 0xFF121212, 0xFFA3A3A3, 0xFFC4C4C4, 0xFF7E7E7E, isDark = true)
         /** 比夜色柔和，字偏暖 —— 纯灰在夜里发青 */
-        val CHARCOAL = ReaderTheme("charcoal", "深灰", 0xFF1E1E1E, 0xFFB5AFA4, 0xFFD0CABE, 0xFF77726A, isDark = true)
-        val INKBLUE = ReaderTheme("inkblue", "墨蓝", 0xFF10151F, 0xFF8CA6C9, 0xFFA9BEDA, 0xFF5C6E88, isDark = true)
+        val CHARCOAL = ReaderTheme("charcoal", "深灰", 0xFF1E1E1E, 0xFFB5AFA4, 0xFFD0CABE, 0xFF8B867D, isDark = true)
+        val INKBLUE = ReaderTheme("inkblue", "墨蓝", 0xFF10151F, 0xFF8CA6C9, 0xFFA9BEDA, 0xFF6D829F, isDark = true)
         /** 真·纯黑：OLED 屏上黑像素不点亮，省电，且没有暗角 */
-        val OLED = ReaderTheme("oled", "纯黑", 0xFF000000, 0xFF999999, 0xFFBBBBBB, 0xFF636363, isDark = true)
+        val OLED = ReaderTheme("oled", "纯黑", 0xFF000000, 0xFF999999, 0xFFBBBBBB, 0xFF767676, isDark = true)
         /** 近黑底 + 中性亮灰字，不带任何色偏 —— 纯黑太硬、夜色偏暖时的中间选择 */
         val OBSIDIAN = ReaderTheme("obsidian", "曜石", 0xFF1C1C1C, 0xFFE9E9E9, 0xFFECECEC, 0xFF8D8D8D, isDark = true)
 
@@ -125,7 +145,7 @@ data class ReaderTheme(
 
         /**
          * 由「纸色 + 字色」推导一整套。标题比正文再深/亮一档，页眉页脚则往纸色靠 ——
-         * 页码和章节名是**辅助信息**，跟正文一样重会抢戏。
+         * 页码和章节名是**辅助信息**，跟正文一样重会抢戏。往纸色靠也有底线：退到不够 4.5:1 就停。
          */
         fun custom(background: Long, textColor: Long): ReaderTheme {
             val dark = relLuminance(background) < 0.5
@@ -135,7 +155,7 @@ data class ReaderTheme(
                 background = background,
                 textColor = textColor,
                 titleColor = blend(textColor, if (dark) 0xFFFFFFFF else 0xFF000000, 0.18f),
-                footerColor = blend(textColor, background, 0.45f),
+                footerColor = readableBlend(textColor, background, 0.45f),
                 isDark = dark,
             )
         }
@@ -166,6 +186,25 @@ data class ReaderTheme(
                 return (a + ((b - a) * t).toLong()).coerceIn(0, 255) shl shift
             }
             return 0xFF000000L or mix(16) or mix(8) or mix(0)
+        }
+
+        /**
+         * 把 [fg] 往 [bg] 退 [fade]，但对比度不低于 [minRatio]：不够线就一点点少退，直到够为止。
+         * 字色本身都不够线（用户自定义了一套低对比配色）时只能原样返回字色 —— 比它更清楚的颜色就不是「这套配色」了。
+         */
+        internal fun readableBlend(
+            fg: Long,
+            bg: Long,
+            fade: Float,
+            minRatio: Double = MIN_SMALL_TEXT_CONTRAST,
+        ): Long {
+            var t = fade
+            while (t > 0f) {
+                val c = blend(fg, bg, t)
+                if (contrastRatio(bg, c) >= minRatio) return c
+                t -= 0.01f
+            }
+            return 0xFF000000L or (fg and 0xFFFFFF)
         }
     }
 }

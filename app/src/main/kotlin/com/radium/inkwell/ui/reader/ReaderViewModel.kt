@@ -30,6 +30,7 @@ import com.radium.inkwell.reader.measure.TextMeasureFacade
 import com.radium.inkwell.reader.paginate.LayoutSpec
 import com.radium.inkwell.reader.paginate.Paginator
 import com.radium.inkwell.reader.render.RenderablePage
+import com.radium.inkwell.ui.components.MessageBus
 import kotlinx.coroutines.Dispatchers
 import com.radium.inkwell.core.model.ChapterContent
 import com.radium.inkwell.core.model.charLength
@@ -42,12 +43,14 @@ import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -101,8 +104,6 @@ data class ReaderUiState(
     val currentSourceName: String = "",
     /** 长按选字是否开启 */
     val textSelectionEnabled: Boolean = true,
-    /** 一次性提示（建了净化规则之类） */
-    val toast: String? = null,
     /** 自动翻页中 */
     val autoFlipping: Boolean = false,
     /** 换源：null=未打开面板；空列表=搜索中/无结果 */
@@ -171,7 +172,6 @@ data class ReaderSessionUi(
 
 data class ReaderOverlayUi(
     val menuVisible: Boolean = false,
-    val toast: String? = null,
     val autoFlipping: Boolean = false,
     val sourceCandidates: List<SearchResult>? = null,
     val searchingSources: Boolean = false,
@@ -196,7 +196,7 @@ private fun ReaderUiState.toSession() = ReaderSessionUi(
 )
 
 private fun ReaderUiState.toOverlay() = ReaderOverlayUi(
-    menuVisible, toast, autoFlipping, sourceCandidates, searchingSources, changingSource,
+    menuVisible, autoFlipping, sourceCandidates, searchingSources, changingSource,
     sourcesDone, sourcesTotal, checkAuthor, autoChanging, autoChangeDone, autoChangeTotal,
     autoChangedTo, readerSheetOpen,
 )
@@ -252,6 +252,15 @@ class ReaderViewModel(
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.Eagerly, _state.value.toc)
 
+    /**
+     * 一次性提示（建了净化规则、换源失败、本章未净化……），由阅读页按纸张主题浮在页顶。
+     *
+     * 从前是 overlay 里的一个 `toast: String?` 字段 —— StateFlow 对相同值去重：连着删两次同一句话、
+     * 连着两次「换源失败: 超时」，第二条直接没了，用户以为没点上。走 [MessageBus]（SharedFlow）每条都送达。
+     */
+    private val messageBus = MessageBus()
+    val messages: Flow<String> = messageBus.messages
+
     private var book: BookEntity? = null
     private var source: ReaderBookSource? = null
     private var position = ReadPosition(0, 0)
@@ -276,10 +285,38 @@ class ReaderViewModel(
 
     // 分页缓存：chapterIndex → 结果；spec 变化即整体作废
     private val paginated = java.util.concurrent.ConcurrentHashMap<Int, Paginator.Result>()
-    private var paginateJob: Job? = null
     private val engineMutex = Mutex()
     /** 测量层不能并发；与 [engineMutex] 拆开，邻章排版不再堵住用户正在等的那一章的 IO */
     private val measureMutex = Mutex()
+
+    /** 「用户在等的那一次定位」，见 [navigate]。同一时刻只留一个 */
+    private var navJob: Job? = null
+    /** [navJob] 要去的章节位置；只有目标固定的跳章（[gotoChapter]）才记，用来认出「同一个目标连点」 */
+    private var navTarget: ReadPosition? = null
+
+    /**
+     * 会话目录换过几次（阅读中后台追更、序号整体错位时 +1，见 [syncSessionToc]）。
+     *
+     * 换目录之前就开始加载的章节，手里拿的是**旧序号**：排完写回 [paginated]，就成了新目录下另一章的缓存 ——
+     * 翻到那一章看到的是别的章的正文。[ensurePaginated] 开工时记下它，排完对不上就丢掉结果。
+     * 部分结果回调跑在 Default 上，所以是 volatile。
+     */
+    @Volatile
+    private var tocGeneration = 0
+
+    /**
+     * 正在换源（手动 / 自动 / 撤销自动换源），计数而不是布尔：手动换源会掐掉还在跑的自动换源，
+     * 后者的 finally 晚一拍才执行，布尔的话它会把前者的「进行中」一起清掉。全在主线程上读写。
+     */
+    private var sourceChangesInFlight = 0
+    private val sourceChanging: Boolean get() = sourceChangesInFlight > 0
+
+    /**
+     * 书内净化超时、正文按未净化显示的章（章号）。提示只在这一章**显示出来**时弹：从前在加载处直接弹，
+     * 邻章预载撞上超时，用户眼前这一章明明净化好了，却冒出一句「本章未净化」。
+     * 预载与显示不在同一线程，用并发集合。
+     */
+    private val purifySkipped: MutableSet<Int> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     init {
         viewModelScope.launch {
@@ -302,19 +339,98 @@ class ReaderViewModel(
      *
      * isCached 由 NetReaderBookSource 在正文落盘后 markCached 写库，是边读边变的；
      * 只在 loadSession 里 map 一次的话，目录里的缓存指示永远停在进书那一刻。
+     *
+     * 目录本身也会变：阅读中后台追更会整本换掉目录行。面板读的是这里的新目录，阅读会话手里却还是
+     * 进书时那一份 —— 两边序号一错开，点新章没反应、点第 i 章打开的是旧目录的第 i 章。
+     * 所以每来一份新目录，也交给 [syncSessionToc] 把会话对齐过去。
      */
     @OptIn(FlowPreview::class)
     private fun observeToc() {
         viewModelScope.launch {
             chapterDao.observeByBook(bookId)
-                .map { chapters -> chapters.map { TocItem(it.index, it.title, it.isCached) } }
                 .distinctUntilChanged()
                 .debounce(TOC_DEBOUNCE_MS)
-                .collect { items ->
-                    _state.value = _state.value.copy(toc = items)
+                .collect { rows ->
+                    _state.value = _state.value.copy(toc = rows.map { TocItem(it.index, it.title, it.isCached) })
+                    syncSessionToc(rows)
                 }
         }
     }
+
+    /**
+     * 库里的目录换了（后台追更），把阅读会话对齐过去：数据源换上新目录，所有按章号记的状态
+     * （当前位置、待显示的目标、分页缓存、未净化标记）按章节 URL 换算到新序号。
+     *
+     * 不跟着改的后果：目录面板是新的、会话是旧的 —— 新章点了没反应（越界被挡掉），下一章/书末按旧章数判，
+     * 前面插了章的话第 i 项打开旧目录的第 i 章，下一次存进度还会把追更刚对齐好的进度盖回旧序号。
+     *
+     * 换源进行中不动：那时库里已是**新源**的目录，而数据源还是旧源 —— 拿旧源的规则去抓新源的地址只会全失败；
+     * 换完 loadSession 会按新目录整个重建会话。
+     */
+    private fun syncSessionToc(rows: List<ChapterEntity>) {
+        if (!sessionReady || sourceChanging) return
+        val src = source as? NetReaderBookSource ?: return
+        // 删书时目录会被清空；追更本身不会写空目录（解析为空直接失败）。别把正在读的会话清空
+        if (rows.isEmpty()) return
+        val old = src.chapters
+        if (sameReadingToc(old, rows)) return
+        val remap = TocRemap(old, rows)
+        val s = _state.value
+        src.updateChapters(rows)
+        // 只在末尾追加了新章（连载追更的常态）：手里记着的序号一个都没动，补上章数、刷新「下一章/书末」即可
+        val held = buildSet {
+            add(position.chapterIndex)
+            add(s.chapterIndex)
+            pendingTarget?.let { add(it.chapterIndex) }
+            addAll(paginated.keys)
+            addAll(purifySkipped)
+        }
+        if (held.all { remap.map(it) == it }) {
+            _state.value = s.copy(chapterCount = rows.size)
+            if (navJob?.isActive != true && s.error == null && paginated[s.chapterIndex] != null) {
+                // 原地重出这一页：hasNext、邻页图层按新章数重算，到了章末还会去预载新出现的下一章
+                showPage(s.chapterIndex, s.pageInChapter, keepOffset = position.charOffset)
+            }
+            return
+        }
+        // 序号整体错位了：此前开工、手里拿着旧序号的加载，结果一律作废（见 tocGeneration）
+        tocGeneration++
+        position = remap.map(position)
+        pendingTarget = pendingTarget?.let { remap.map(it) }
+        val rekeyed = paginated.mapNotNull { (index, result) ->
+            remap.map(index)?.let { it to result.withChapterIndex(it) }
+        }
+        paginated.clear()
+        paginated.putAll(rekeyed)
+        val skipped = purifySkipped.mapNotNull { remap.map(it) }
+        purifySkipped.clear()
+        purifySkipped.addAll(skipped)
+        // 眼前这一章在新目录里的序号；它从目录里没了（null）就只能跟着 position 的兜底走、重新加载
+        val shownMapped = remap.map(s.chapterIndex)
+        _state.value = s.copy(chapterCount = rows.size, chapterIndex = shownMapped ?: position.chapterIndex)
+        when {
+            // 报错页上不自动重试：只把序号换好，用户点「重试」时去的就是新目录里的那一章
+            s.error != null -> Unit
+            // 眼前这一页还在缓存里（换算后）：原地按新序号重出，进度随之按新序号存下
+            navJob?.isActive != true && pendingTarget == null &&
+                shownMapped != null && paginated[shownMapped] != null ->
+                showPage(shownMapped, s.pageInChapter, keepOffset = position.charOffset)
+            // 还有一次跳章在路上：它手里是旧序号，结果会被丢掉 —— 按换算后的目标重新发起
+            else -> navigate { pendingTarget ?: position }
+        }
+    }
+
+    /** 同一份分页结果挂到新章号下（目录换过、序号整体平移时用）：页的内容不动，只改各处记着的章号 */
+    private fun Paginator.Result.withChapterIndex(index: Int): Paginator.Result =
+        if (chapter.chapterIndex == index) this
+        else Paginator.Result(
+            chapter = chapter.copy(
+                chapterIndex = index,
+                pages = chapter.pages.map { it.copy(chapterIndex = index) },
+            ),
+            measured = measured,
+            complete = complete,
+        )
 
     private suspend fun loadSession() {
         try {
@@ -325,6 +441,9 @@ class ReaderViewModel(
             // 打开即已知晓：书架上那个"有 N 章新的"红点该灭了；打开时间也记下来，书架按它排「最近阅读」
             bookRepo.markOpened(bookId)
             position = ReadPosition(b.readChapterIndex, b.readCharOffset)
+            // 新会话以库里的进度为准。上一会话（换源前）没落地的目标是旧目录的序号，留着会被
+            // 随后的重排（onLayoutReady 取 pendingTarget ?: position）拿去，在新目录里打开一个不相干的章
+            pendingTarget = null
             // splash 的书名/封面第一时间交出去：下面 WebDAV 无目录的冷路径要先抓一次目录
             // （网络往返），而那正是 splash 必然出场的场景 —— 拖到目录回来才随全量 state 写入，
             // 出场的就是一块无名素色块，起不到「交代在开哪本书」的作用。
@@ -397,12 +516,10 @@ class ReaderViewModel(
                     pruneStaleChapterCache(position.chapterIndex, chapters)
                 }
             }
-            // 排版环境已就绪（换源重载场景）→ 立即重新分页
+            // 排版环境已就绪（换源重载场景）→ 立即重新分页。分页缓存在这里清（navigate 同步清一次、
+            // 拿到锁再清一次）—— 在换源处清会与在飞的预加载抢
             if (facade != null && spec != null) {
-                engineMutex.withLock {
-                    paginated.clear()
-                    showPosition(position)
-                }
+                navigate(invalidate = true) { position }
             }
         } catch (e: CancellationException) {
             // 退出阅读/换源取消了这次进书，不是"打开失败"。吞掉会误触发自动换源、改掉用户的源。
@@ -447,14 +564,44 @@ class ReaderViewModel(
         if (this.spec == spec && this.facade != null) return
         this.facade = facade
         this.spec = spec
-        paginateJob?.cancel()
-        paginateJob = viewModelScope.launch {
+        // 加载途中旋转/改字号：用户点的那一章还没出来，重排要接着去那一章，别退回旧章
+        navigate(invalidate = true) { pendingTarget ?: position }
+    }
+
+    /**
+     * 「用户在等的那一次定位」（翻章、跳目录、重试、重排后回到原处、换源后重进）统一从这里发起，
+     * **新的一次取代旧的**。
+     *
+     * 从前每次都是新起一个协程去排 engineMutex：慢源上点了下一章（N+1 要等满 15 秒超时）再点上一章，
+     * N-1 只能排在 N+1 后面干等；N+1 一超时，先闪一下报错，紧接着自动换源按 N+1 去换 —— 把刚点了上一章的人
+     * 又拽回 N+1。现在旧的那次直接取消：它抛的是 CancellationException，ensurePaginated / loadPurified 原样
+     * 往上抛，既不会被当成「读不出来」去报错，也不会触发自动换源。
+     *
+     * [target] 拿到锁之后才求值：排在前面的那次可能刚把 position / pendingTarget 挪过。
+     * [invalidate] 为 true 时**同步**清掉分页缓存（视口/净化规则/书源变了）：这一轮若还没拿到锁就被下一次
+     * 跳转取代，锁里那句 clear 根本轮不到执行，新的那次就会捡到按旧排版/旧规则分好的页。
+     */
+    private fun navigate(invalidate: Boolean = false, target: () -> ReadPosition) {
+        navJob?.cancel()
+        navTarget = null
+        if (invalidate) paginated.clear()
+        navJob = viewModelScope.launch {
             engineMutex.withLock {
-                paginated.clear()
-                // 加载途中旋转/改字号：用户点的那一章还没出来，重排要接着去那一章，别退回旧章
-                showPosition(pendingTarget ?: position)
+                // 等锁期间完成的邻章预载可能还是按旧环境排的，拿到锁再清一遍
+                if (invalidate) paginated.clear()
+                showPosition(target())
             }
         }
+    }
+
+    /**
+     * 用户就地翻了页 / 拖了进度条：还在路上的跳章作废。
+     * 不掐的话，它落地时会把人从眼前这一页拽到刚才点过、后来又放弃了的那一章。
+     */
+    private fun cancelNavigation() {
+        navJob?.cancel()
+        navJob = null
+        navTarget = null
     }
 
     fun flip(direction: FlipDirection) {
@@ -465,6 +612,7 @@ class ReaderViewModel(
         when (direction) {
             FlipDirection.FORWARD -> {
                 if (s.pageInChapter + 1 < chapter.pages.size) {
+                    cancelNavigation()
                     showPage(s.chapterIndex, s.pageInChapter + 1)
                 } else if (!result.complete) {
                     // 本章还在往后排，下一页马上就来；跳章会把人甩到下一章开头
@@ -477,6 +625,7 @@ class ReaderViewModel(
             }
             FlipDirection.BACKWARD -> {
                 if (s.pageInChapter > 0) {
+                    cancelNavigation()
                     showPage(s.chapterIndex, s.pageInChapter - 1)
                 } else if (s.chapterIndex > 0) {
                     gotoChapter(s.chapterIndex - 1, charOffset = Int.MAX_VALUE) // 上一章最后一页
@@ -489,12 +638,12 @@ class ReaderViewModel(
         val count = _state.value.chapterCount
         if (index !in 0 until count) return
         progressHeld = false
+        val target = ReadPosition(index, charOffset)
+        // 同一个目标还在路上（慢源上连点「下一章」）：接着等它，别取消重来 —— 否则每点一下超时就从头算
+        if (navJob?.isActive == true && navTarget == target) return
         _state.value = _state.value.copy(loading = paginated[index] == null)
-        viewModelScope.launch {
-            engineMutex.withLock {
-                showPosition(ReadPosition(index, charOffset))
-            }
-        }
+        navigate { target }
+        navTarget = target
     }
 
     /**
@@ -525,6 +674,8 @@ class ReaderViewModel(
         val s = _state.value
         val chapter = paginated[s.chapterIndex]?.chapter ?: return
         val offset = (percent.coerceIn(0f, 1f) * chapter.totalChars).toInt()
+        // 进度条拖的是眼前这一章：还在路上的跳章（慢源上刚点的下一章）作废，否则它一落地就把人拽走
+        cancelNavigation()
         showPage(s.chapterIndex, chapter.pageIndexFor(offset))
     }
 
@@ -562,6 +713,13 @@ class ReaderViewModel(
 
     private var autoFlipJob: Job? = null
 
+    /** 阅读页上有没有长按选中的文字（选区是 UI 状态，由 ReaderScreen 告知） */
+    private val selectionActive = MutableStateFlow(false)
+
+    fun setSelectionActive(active: Boolean) {
+        selectionActive.value = active
+    }
+
     fun toggleAutoFlip() {
         if (_state.value.autoFlipping) {
             stopAutoFlip()
@@ -571,6 +729,12 @@ class ReaderViewModel(
         autoFlipJob = viewModelScope.launch {
             while (true) {
                 delay(_state.value.settings.autoFlipSeconds.coerceAtLeast(3) * 1000L)
+                // 选字期间停表：手指还按在选区上、工具条还开着，底下那页翻走了，复制/净化拿到的是别页的字。
+                // 选区收起后**重新计满一个间隔**再翻 —— 不然刚点完「复制」页面就立刻跳走，像是点出了翻页
+                if (selectionActive.value) {
+                    selectionActive.first { !it }
+                    continue
+                }
                 val s = _state.value
                 // 到书末就停下，而不是每隔几秒弹一次"已经是最后一页了"
                 if (!s.hasNext) {
@@ -594,22 +758,17 @@ class ReaderViewModel(
 
     /** 正文加载失败后重试：清掉分页缓存重来一遍（站点抽风、临时封 IP 都可能只是一次性的） */
     fun retry() {
-        viewModelScope.launch {
-            // 手动重试 = 用户想再给一次机会（可能网络恢复了）；自动换源的额度跟着复位
-            autoChangeUsed = false
-            _state.value = _state.value.copy(error = null, loading = true)
-            // 进书那一步就失败了（书源被删、目录拉不到、本地文件丢失）：只重排当前章会在
-            // ensurePaginated 的守卫上静默返回，兜底报错又要 source 非空 —— 永远转圈、没有出口。
-            if (!sessionReady) {
-                loadSession()
-                return@launch
-            }
-            engineMutex.withLock {
-                paginated.clear()
-                // 重试的是**刚才失败的那一章**，不是上一章
-                showPosition(pendingTarget ?: position)
-            }
+        // 手动重试 = 用户想再给一次机会（可能网络恢复了）；自动换源的额度跟着复位
+        autoChangeUsed = false
+        _state.value = _state.value.copy(error = null, loading = true)
+        // 进书那一步就失败了（书源被删、目录拉不到、本地文件丢失）：只重排当前章会在
+        // ensurePaginated 的守卫上静默返回，兜底报错又要 source 非空 —— 永远转圈、没有出口。
+        if (!sessionReady) {
+            viewModelScope.launch { loadSession() }
+            return
         }
+        // 重试的是**刚才失败的那一章**，不是上一章
+        navigate(invalidate = true) { pendingTarget ?: position }
     }
 
     fun clearBookEnd() {
@@ -622,10 +781,7 @@ class ReaderViewModel(
             var first = true
             replaceRules.observeForBook(bookId).collect {
                 if (first) { first = false; return@collect } // 首帧是初始值，别白重排一次
-                engineMutex.withLock {
-                    paginated.clear()
-                    showPosition(pendingTarget ?: position)
-                }
+                navigate(invalidate = true) { pendingTarget ?: position }
             }
         }
     }
@@ -642,15 +798,11 @@ class ReaderViewModel(
         if (text.isEmpty()) return
         viewModelScope.launch {
             replaceRules.createFromSelection(bookId, text, replacement)
-            _state.value = _state.value.copy(
-                error = null,
-                toast = if (replacement.isEmpty()) "已删除「${text.take(12)}」" else "已替换「${text.take(12)}」",
+            _state.value = _state.value.copy(error = null)
+            messageBus.emit(
+                if (replacement.isEmpty()) "已删除「${text.take(12)}」" else "已替换「${text.take(12)}」",
             )
         }
-    }
-
-    fun clearToast() {
-        _state.value = _state.value.copy(toast = null)
     }
 
     // ---------- 换源 ----------
@@ -860,57 +1012,84 @@ class ReaderViewModel(
             // 用户亲自选了源：掐掉可能还在跑的自动换源，否则它探测成功后会把用户的选择覆盖掉
             autoChangeJob?.cancel()
             autoChangeUsed = true
-            // 旧源的预取还在飞：必须等它停，否则清完缓存后它们回来会把旧正文写进新源的缓存目录
-            stopPrefetch()
-            val rule = sourceRepo.getRule(candidate.sourceId)
-            if (rule == null) {
-                _state.value = _state.value.copy(changingSource = false, error = "书源不存在")
-                return@launch
-            }
-            // 换源前记下旧源：会话缓存要把它塞回候选，否则再开换源面板只能在「新源之外」挑，
-            // 退回刚才那个源还得重新搜一遍 —— 正是这次优化要消掉的浪费。
-            val prevSourceId = b.sourceId
-            val prevBookUrl = b.bookUrl
-            val prevSourceName = _state.value.currentSourceName
-            netBookRepo.changeSource(b, candidate, rule)
-                .onSuccess {
-                    // 选定源时搜索可能还在飞（上面已 cancel）。手里已有候选就当本轮可用，
-                    // 否则 complete 仍是 false，下次再开又会全量重搜 —— 白浪费刚搜到的那批。
-                    synchronized(rawCandidates) {
-                        if (rawCandidates.isNotEmpty()) sourceSearchComplete = true
-                        if (prevSourceId != null && prevBookUrl != null &&
-                            rawCandidates.none { it.sourceId == prevSourceId }
-                        ) {
-                            rawCandidates += SearchResult(
-                                title = b.title,
-                                bookUrl = prevBookUrl,
-                                author = b.author.ifBlank { null },
-                                intro = b.intro,
-                                latestChapter = b.latestChapterTitle,
-                                sourceId = prevSourceId,
-                                sourceName = prevSourceName,
-                            )
+            // 旧源的预取还在飞：必须等它停，否则清完缓存后它们回来会把旧正文写进新源的缓存目录。
+            // beginSourceChange 放进 try：等预取停下时被取消，finally 也得把计数还回去
+            try {
+                beginSourceChange()
+                val rule = sourceRepo.getRule(candidate.sourceId)
+                if (rule == null) {
+                    // 提示而不是 error：error 会把整个阅读区换成报错页，可旧源明明还读得好好的 ——
+                    // 换源没成，眼前这一页不该跟着没了
+                    _state.value = _state.value.copy(changingSource = false)
+                    messageBus.emit("书源不存在")
+                    return@launch
+                }
+                // 换源前记下旧源：会话缓存要把它塞回候选，否则再开换源面板只能在「新源之外」挑，
+                // 退回刚才那个源还得重新搜一遍 —— 正是这次优化要消掉的浪费。
+                val prevSourceId = b.sourceId
+                val prevBookUrl = b.bookUrl
+                val prevSourceName = _state.value.currentSourceName
+                netBookRepo.changeSource(b, candidate, rule)
+                    .onSuccess {
+                        // 选定源时搜索可能还在飞（上面已 cancel）。手里已有候选就当本轮可用，
+                        // 否则 complete 仍是 false，下次再开又会全量重搜 —— 白浪费刚搜到的那批。
+                        synchronized(rawCandidates) {
+                            if (rawCandidates.isNotEmpty()) sourceSearchComplete = true
+                            if (prevSourceId != null && prevBookUrl != null &&
+                                rawCandidates.none { it.sourceId == prevSourceId }
+                            ) {
+                                rawCandidates += SearchResult(
+                                    title = b.title,
+                                    bookUrl = prevBookUrl,
+                                    author = b.author.ifBlank { null },
+                                    intro = b.intro,
+                                    latestChapter = b.latestChapterTitle,
+                                    sourceId = prevSourceId,
+                                    sourceName = prevSourceName,
+                                )
+                            }
                         }
+                        _state.value = _state.value.copy(
+                            changingSource = false,
+                            sourceCandidates = null,
+                            menuVisible = false,
+                            loading = true,
+                            // 换源多半就是为了绕开上一个源的报错；不清掉的话新源加载成功了
+                            // 还挂着旧错误，用户以为换源没生效
+                            error = null,
+                        )
+                        // 分页缓存由 loadSession 清掉 —— 在这里清会与在飞的预加载抢
+                        loadSession()
                     }
-                    _state.value = _state.value.copy(
-                        changingSource = false,
-                        sourceCandidates = null,
-                        menuVisible = false,
-                        loading = true,
-                        // 换源多半就是为了绕开上一个源的报错；不清掉的话新源加载成功了
-                        // 还挂着旧错误，用户以为换源没生效
-                        error = null,
-                    )
-                    // 分页缓存由 loadSession 在互斥锁内清掉 —— 在这里清会与在飞的预加载抢
-                    loadSession()
-                }
-                .onFailure {
-                    _state.value = _state.value.copy(
-                        changingSource = false,
-                        error = "换源失败: ${it.message}",
-                    )
-                }
+                    .onFailure {
+                        // 同上：旧源还能读，失败只提示一句，面板留着让用户换一个试。
+                        // 本来就停在报错页（读不出来才来换源）的，报错页原样留着，重试/换源的出口都还在
+                        _state.value = _state.value.copy(changingSource = false)
+                        messageBus.emit("换源失败: ${it.message}")
+                    }
+            } finally {
+                endSourceChange()
+            }
         }
+    }
+
+    /**
+     * 换源开始：停掉旧源的预取/邻章预载并等它们真停下，此后不再起新的；旧源抓到的正文也不再落盘。
+     *
+     * 从前只在开头 stopPrefetch 一次。换源要走一趟网络（详情 + 目录），这几秒里用户关掉面板接着翻，
+     * showPage 又把预载、预取拉起来了 —— 它们走的还是旧源，在 changeSource 清完缓存之后才写回来：
+     * 旧源的正文成了新目录里的「已缓存」。
+     */
+    private suspend fun beginSourceChange() {
+        sourceChangesInFlight++
+        (source as? NetReaderBookSource)?.cacheWritesHeld = true
+        stopPrefetch()
+    }
+
+    /** 换源结束（成功、失败、被取消都走这里）。没换成的话旧源还在用，恢复它的缓存写入 */
+    private fun endSourceChange() {
+        sourceChangesInFlight--
+        if (!sourceChanging) (source as? NetReaderBookSource)?.cacheWritesHeld = false
     }
 
     // ---------- 自动换源 ----------
@@ -980,37 +1159,42 @@ class ReaderViewModel(
 
             // 旧源的预取还在天上飞。必须等它停，否则 changeSource 清完缓存之后它们才回来，
             // 会把**旧源的正文**写进新源的缓存目录，并给新目录的同序号章节打上"已缓存"。
-            stopPrefetch()
+            // 换源期间也不许再起新的（见 beginSourceChange）。
+            try {
+                beginSourceChange()
 
-            // 撤销退回的是「原来读到的那个字」—— 最后真正显示出来的 position，而不是没读出来的目标章
-            val snapshot = b.sourceId?.let { sid ->
-                b.bookUrl?.let { url ->
-                    UndoSnapshot(sid, url, NetBookRepository.ReadAnchor(position.chapterIndex, position.charOffset))
+                // 撤销退回的是「原来读到的那个字」—— 最后真正显示出来的 position，而不是没读出来的目标章
+                val snapshot = b.sourceId?.let { sid ->
+                    b.bookUrl?.let { url ->
+                        UndoSnapshot(sid, url, NetBookRepository.ReadAnchor(position.chapterIndex, position.charOffset))
+                    }
                 }
+
+                netBookRepo.changeSource(
+                    b, probe.result, probe.rule,
+                    // 库里存的进度还是上一章；按它对齐，换完源就落回刚读完那章 —— 要按目标章对齐
+                    alignFrom = NetBookRepository.ReadAnchor(target.chapterIndex, 0),
+                )
+                    .onSuccess {
+                        undoSnapshot = snapshot
+                        _state.value = _state.value.copy(
+                            autoChanging = false,
+                            loading = true,
+                            error = null,
+                            autoChangedTo = probe.rule.name,
+                        )
+                        loadSession()
+                    }
+                    .onFailure {
+                        _state.value = _state.value.copy(
+                            autoChanging = false,
+                            loading = false,
+                            error = "$cause\n自动换源失败: ${it.message}",
+                        )
+                    }
+            } finally {
+                endSourceChange()
             }
-
-            netBookRepo.changeSource(
-                b, probe.result, probe.rule,
-                // 库里存的进度还是上一章；按它对齐，换完源就落回刚读完那章 —— 要按目标章对齐
-                alignFrom = NetBookRepository.ReadAnchor(target.chapterIndex, 0),
-            )
-                .onSuccess {
-                    undoSnapshot = snapshot
-                    _state.value = _state.value.copy(
-                        autoChanging = false,
-                        loading = true,
-                        error = null,
-                        autoChangedTo = probe.rule.name,
-                    )
-                    loadSession()
-                }
-                .onFailure {
-                    _state.value = _state.value.copy(
-                        autoChanging = false,
-                        loading = false,
-                        error = "$cause\n自动换源失败: ${it.message}",
-                    )
-                }
         }
     }
 
@@ -1031,41 +1215,41 @@ class ReaderViewModel(
             val rule = sourceRepo.getRule(snap.sourceId)
             if (rule == null) {
                 undoSnapshot = null
-                _state.value = _state.value.copy(
-                    autoChangedTo = null,
-                    toast = "原书源已不存在，无法退回",
-                )
+                _state.value = _state.value.copy(autoChangedTo = null)
+                messageBus.emit("原书源已不存在，无法退回")
                 return@launch
             }
             _state.value = _state.value.copy(changingSource = true)
-            stopPrefetch()
+            try {
+                beginSourceChange()
 
-            val back = SearchResult(
-                title = b.title,
-                bookUrl = snap.bookUrl,
-                author = b.author,
-                sourceId = rule.id,
-                sourceName = rule.name,
-            )
-            netBookRepo.changeSource(b, back, rule, restore = snap.anchor)
-                .onSuccess {
-                    undoSnapshot = null
-                    // autoChangeUsed 保持 true：用户明确表示要待在这个源上。
-                    // 放开的话，回来立刻又读不出正文，转头就被自动换走 —— 撤销等于没撤。
-                    _state.value = _state.value.copy(
-                        changingSource = false,
-                        autoChangedTo = null,
-                        loading = true,
-                        error = null,
-                    )
-                    loadSession()
-                }
-                .onFailure {
-                    _state.value = _state.value.copy(
-                        changingSource = false,
-                        toast = "退回失败: ${it.message}",
-                    )
-                }
+                val back = SearchResult(
+                    title = b.title,
+                    bookUrl = snap.bookUrl,
+                    author = b.author,
+                    sourceId = rule.id,
+                    sourceName = rule.name,
+                )
+                netBookRepo.changeSource(b, back, rule, restore = snap.anchor)
+                    .onSuccess {
+                        undoSnapshot = null
+                        // autoChangeUsed 保持 true：用户明确表示要待在这个源上。
+                        // 放开的话，回来立刻又读不出正文，转头就被自动换走 —— 撤销等于没撤。
+                        _state.value = _state.value.copy(
+                            changingSource = false,
+                            autoChangedTo = null,
+                            loading = true,
+                            error = null,
+                        )
+                        loadSession()
+                    }
+                    .onFailure {
+                        _state.value = _state.value.copy(changingSource = false)
+                        messageBus.emit("退回失败: ${it.message}")
+                    }
+            } finally {
+                endSourceChange()
+            }
         }
     }
 
@@ -1091,6 +1275,7 @@ class ReaderViewModel(
         pendingTarget = target
         val src = source
         val startSpec = spec
+        val startGen = tocGeneration
         val result = ensurePaginated(
             target.chapterIndex,
             userFacing = true,
@@ -1104,8 +1289,9 @@ class ReaderViewModel(
             // 加载期间换了源也不报：ensurePaginated 是有意丢掉旧源结果，新会话随后会自己再定位一次。
             // 加载期间换了视口（旋转、改字号）同理：结果按旧 spec 排的被丢掉了，onLayoutReady
             // 排着队，拿到锁就会按 [pendingTarget] 重来 —— 这里报错只会闪一下假的「读不出来」。
+            // 加载期间目录换过（后台追更）也一样：旧序号的结果被丢掉，syncSessionToc 已按新序号重新发起。
             if (src != null && source === src && facade != null && spec != null &&
-                spec == startSpec && _state.value.error == null
+                spec == startSpec && tocGeneration == startGen && _state.value.error == null
             ) {
                 Log.w(TAG, "第 ${target.chapterIndex} 章取不到分页结果，且排版环境已就绪")
                 _state.value = _state.value.copy(
@@ -1136,16 +1322,34 @@ class ReaderViewModel(
         // 取消"混为一谈 —— 翻页时取消上一次加载也会被当成超时，进而触发自动换源。
         val raw = withTimeoutOrNull(CONTENT_TIMEOUT_MS) { src.loadChapter(chapterIndex) }
             ?: throw ContentTimeoutException()
-        val purifier = Purifier.lenient(replaceRules.purifyForBook(bookId))
-        if (purifier.isEmpty) return raw
+        val rules = replaceRules.purifyForBook(bookId)
+        if (rules.isEmpty()) {
+            purifySkipped.remove(chapterIndex)
+            return raw
+        }
+        // 编译规则、逐段替换都切到 Default。调用方在主线程（Main.immediate）上：正则规则交给
+        // RegexWatchdog 看着跑，它在 future.get 里一等就是 3 秒 —— 从前这 3 秒卡的就是主线程，
+        // 翻页、动画全冻住，严重时直接 ANR。
+        //
         // 净化超时：正文照常显示（未净化），但**必须**告诉用户 —— 否则"我的替换规则怎么不生效了"
         // 无从查起。这条路径以前没有任何时间上限：净化是在 engineMutex 里跑的，一旦某条规则
         // 陷进灾难性回溯，锁死的不只是当前章，而是此后所有章节的加载。
-        return try {
-            raw.copy(elements = purifier.apply(raw.elements))
-        } catch (_: PurifyTimeoutException) {
-            _state.value = _state.value.copy(toast = "净化规则太复杂已跳过，本章未净化")
-            raw
+        // 提示不在这里弹：这一章可能只是邻章预载，用户眼前那章好好的。记下来，等它真显示出来再说（见 showPage）。
+        return withContext(Dispatchers.Default) {
+            try {
+                val purifier = Purifier.lenient(rules)
+                raw.copy(elements = purifier.apply(raw.elements)).also { purifySkipped.remove(chapterIndex) }
+            } catch (_: PurifyTimeoutException) {
+                purifySkipped.add(chapterIndex)
+                raw
+            }
+        }
+    }
+
+    /** 这一章是按未净化显示的（净化超时）：显示出来时提示一次 */
+    private fun notifyIfUnpurified(chapterIndex: Int) {
+        if (purifySkipped.remove(chapterIndex)) {
+            messageBus.emit("净化规则太复杂已跳过，本章未净化")
         }
     }
 
@@ -1168,6 +1372,8 @@ class ReaderViewModel(
         val baseSpec = spec ?: return null
         return try {
             val content = loadPurified(src, chapterIndex)
+            // 滚动模式不走 showPage：用户正在等的这一章就在这里提示
+            if (userFacing) notifyIfUnpurified(chapterIndex)
             val title = src.chapterTitle(chapterIndex) ?: ""
             val tall = baseSpec.copy(
                 viewportHeightPx = SCROLL_VIEWPORT_PX,
@@ -1409,6 +1615,7 @@ class ReaderViewModel(
             atBookEnd = false,
         )
         saveProgress()
+        notifyIfUnpurified(chapterIndex)
         // 滚动一次惯性就能甩过好几页，临近章末再预取会来不及，倒数第二页就开始排邻章。
         if (pageIndex <= 1 || pageIndex >= result.chapter.pages.lastIndex - 1) {
             preloadNeighbors(chapterIndex)
@@ -1443,6 +1650,10 @@ class ReaderViewModel(
         val src = source ?: return null
         val facade = facade ?: return null
         val spec = spec ?: return null
+        val gen = tocGeneration
+        // 发起这次加载的协程（跳章时就是 navJob）。部分结果的 showPage 是另投递到主线程的，
+        // 不随它取消 —— 这一跳已经被下一次取代的话，别再把人拽回被放弃的那一章
+        val caller = currentCoroutineContext()[Job]
         return try {
             val content = loadPurified(src, chapterIndex)
             val title = src.chapterTitle(chapterIndex) ?: ""
@@ -1453,8 +1664,10 @@ class ReaderViewModel(
                         chapterIndex, title, content, spec,
                         notifyAfterChar = notifyAfterChar,
                         onPartial = { partial ->
-                            // 排到一半视口/字号已经换了：这份是按旧 spec 排的，别塞进缓存；源换了同理
-                            if (spec != this@ReaderViewModel.spec || src !== source) return@paginate
+                            // 排到一半视口/字号已经换了：这份是按旧 spec 排的，别塞进缓存；源换了、目录换过同理
+                            if (spec != this@ReaderViewModel.spec || src !== source || gen != tocGeneration) {
+                                return@paginate
+                            }
                             paginated[chapterIndex] = partial
                             if (userFacing) {
                                 val pageIdx = if (notifyAfterChar == Int.MAX_VALUE) {
@@ -1466,6 +1679,7 @@ class ReaderViewModel(
                                 // 直接在这里调就是和主线程上的写入赛跑。投递回主线程 —— 它排在本次
                                 // 排版完成后的那次 showPage 之前，先出的仍是这一屏
                                 viewModelScope.launch(Dispatchers.Main) {
+                                    if (caller?.isActive == false || gen != tocGeneration) return@launch
                                     showPage(chapterIndex, pageIdx, keepOffset = notifyAfterChar)
                                 }
                             }
@@ -1481,6 +1695,8 @@ class ReaderViewModel(
             // 同理：拉正文期间换了源（loadSession 已清过分页缓存），这份是**旧源**的正文。
             // 写回去，下一章翻过去看到的还是旧源的内容 —— 而换源多半就是嫌它的正文不对。
             if (src !== source) return null
+            // 同理：拉正文期间目录换过、序号整体错了位，chapterIndex 已经指向另一章
+            if (gen != tocGeneration) return null
             paginated[chapterIndex] = result
             // 目录跳章时 position 还停在旧章：若只按旧章号裁窗口，刚分好页的目标章会被
             // 当场剔除，随后 showPage 取不到分页结果直接 return，页面永远停在转圈。
@@ -1512,6 +1728,9 @@ class ReaderViewModel(
     private val neighborScope = CoroutineScope(viewModelScope.coroutineContext + neighborJobs)
 
     private fun preloadNeighbors(center: Int) {
+        // 换源进行中不起新的预载/预取：它们走的还是旧源，等 changeSource 清完缓存才写回来，
+        // 旧源的正文就成了新目录里的「已缓存」（见 beginSourceChange）。换完 loadSession 会重新发起
+        if (sourceChanging) return
         neighborScope.launch {
             // 邻章排版不占 engineMutex：用户翻章的 IO 不该排队等上一章量字。
             // 测量仍走 measureMutex（facade 不能并发）。
@@ -1548,6 +1767,7 @@ class ReaderViewModel(
      * 代价是零：用户还在看当前这页，几百毫秒之后才可能翻到预取的那几章。
      */
     private fun prefetchAhead(center: Int) {
+        if (sourceChanging) return // 理由同 preloadNeighbors
         val ahead = _state.value.settings.preloadChapters
         if (ahead <= 0) return
         val src = source ?: return

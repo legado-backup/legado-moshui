@@ -42,16 +42,60 @@ class ReaderThemeContrastTest {
     }
 
     /**
-     * 页眉页脚是辅助信息（页码、章节名），本就该弱于正文 —— 但也不能弱到看不见。
-     * 3:1 是 WCAG 对大字/非正文的下限。
+     * 页眉页脚是辅助信息（页码、章节名），本就该弱于正文 —— 但也不能弱到看不清。
+     * 它是 11~12sp 的小字，纸面上的提示（「已经是最后一页了」、换源进度、返回书架）也用它，
+     * 所以按小字的 4.5:1（AA）算，不是大字/非正文的 3:1。从前暖纸、夜色一档只有 3.4:1 上下。
      */
     @Test
-    fun `页眉页脚弱于正文但仍可辨认`() {
+    fun `页眉页脚弱于正文但够小字的 AA`() {
         ReaderTheme.ALL.forEach { t ->
             val footer = ReaderTheme.contrastRatio(t.background, t.footerColor)
-            assertTrue(footer >= 3.0, "${t.label} 的页脚只有 %.2f:1，看不清".format(footer))
+            assertTrue(
+                footer >= ReaderTheme.MIN_SMALL_TEXT_CONTRAST,
+                "${t.label} 的页脚只有 %.2f:1，小字看不清".format(footer),
+            )
             assertTrue(footer <= contrast(t), "${t.label} 的页脚比正文还抢眼")
         }
+    }
+
+    /**
+     * 浮层里的次要文字（ReaderThemeScope 的 onSurfaceVariant）：从前「正文色 × 0.7 透明度」一刀切，
+     * 夜色/墨蓝/纯黑、宣纸/牛皮上只剩 3.9~4.2:1。钉死 ≥ 4.5:1，且仍弱于正文（不然分不出主次）。
+     */
+    @Test
+    fun `面板次要文字够 AA 且弱于正文`() {
+        ReaderTheme.ALL.forEach { t ->
+            val secondary = ReaderTheme.contrastRatio(t.background, t.secondaryTextColor)
+            assertTrue(
+                secondary >= ReaderTheme.MIN_SMALL_TEXT_CONTRAST,
+                "${t.label} 的次要文字只有 %.2f:1".format(secondary),
+            )
+            assertTrue(secondary < contrast(t), "${t.label} 的次要文字和正文一样重，分不出主次")
+        }
+    }
+
+    /** 本来就够线的主题，次要文字维持「正文退三成」的老样子 —— 修对比度不该顺手把它们也改了 */
+    @Test
+    fun `够线的主题次要文字不变`() {
+        val t = ReaderTheme.PAPER
+        // 0.3 = 从前 alpha 0.7 叠在纸上的混合比例；暖纸本来就有 4.65:1
+        assertEquals(0xFF726A5CL, t.secondaryTextColor)
+    }
+
+    @Test
+    fun `自定义主题的页脚也守住小字下限`() {
+        // 中等对比的自定义配色：照旧往纸色退 45% 会掉到 4.5 以下
+        val t = ReaderTheme.custom(0xFFF2E8D5, 0xFF4A3F30)
+        val footer = ReaderTheme.contrastRatio(t.background, t.footerColor)
+        assertTrue(footer >= ReaderTheme.MIN_SMALL_TEXT_CONTRAST, "自定义页脚只有 %.2f:1".format(footer))
+        assertTrue(footer < ReaderTheme.contrastRatio(t.background, t.textColor))
+    }
+
+    @Test
+    fun `字色本身不够线时页脚只能退回字色`() {
+        // 用户自定义了一套低对比配色：比字色更清楚的颜色就不是这套配色了，别凭空造
+        val t = ReaderTheme.custom(0xFF777777, 0xFF555555)
+        assertEquals(t.textColor, t.footerColor)
     }
 
     @Test

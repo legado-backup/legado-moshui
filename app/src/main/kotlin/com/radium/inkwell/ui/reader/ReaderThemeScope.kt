@@ -53,7 +53,9 @@ fun ReaderThemeScope(theme: ReaderTheme, content: @Composable () -> Unit) {
             surface = bg,
             onSurface = fg,
             surfaceVariant = containerMid,
-            onSurfaceVariant = fg.copy(alpha = 0.7f),
+            // 不再是 fg × 0.7 透明度：那在夜色/墨蓝/纯黑和宣纸/牛皮上只有 3.9~4.2:1，小字发虚。
+            // secondaryTextColor 仍从「退三成」出发，只在不够 4.5:1 的主题上少退一点（见 ReaderThemeContrastTest）
+            onSurfaceVariant = Color(theme.secondaryTextColor),
             surfaceContainerLowest = bg,
             surfaceContainerLow = containerLow,
             surfaceContainer = containerMid,

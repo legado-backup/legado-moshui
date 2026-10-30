@@ -1,9 +1,13 @@
 package com.radium.inkwell.reader.flip
 
+import com.radium.inkwell.core.model.ChapterContent
+import com.radium.inkwell.core.model.ContentElement
 import com.radium.inkwell.reader.api.FlipDirection
+import com.radium.inkwell.reader.paginate.FakeTextMeasureFacade
 import com.radium.inkwell.reader.paginate.LayoutSpec
 import com.radium.inkwell.reader.paginate.PageItem
 import com.radium.inkwell.reader.paginate.PageSpec
+import com.radium.inkwell.reader.paginate.Paginator
 import com.radium.inkwell.reader.render.RenderablePage
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -182,6 +186,53 @@ class ScrollPageMathTest {
         )
         // 800px 空图收掉后，两段字挨在一起
         assertEquals(120f, scrollPageHeight(page), 0.01f)
+    }
+
+    @Test
+    fun `滚动页高带上页尾段距`() {
+        val page = RenderablePage(
+            spec = PageSpec(
+                chapterIndex = 0,
+                pageIndexInChapter = 0,
+                items = listOf(PageItem.TextSlice(1, 0, 1, 0f, 80f, isTitle = false)),
+                startCharOffset = 0,
+                endCharOffset = 20,
+                trailingGapPx = 12f,
+            ),
+            measured = emptyMap(),
+        )
+        assertEquals(92f, scrollPageHeight(page), 0.01f)
+    }
+
+    /**
+     * 端到端：真分页 → 滚动拼页。段尾断页处，下一页首段离上一段末行的距离必须等于页内段距 ——
+     * 从前只量到末行的底，两段直接贴在一起。
+     */
+    @Test
+    fun `段尾断页处滚动拼页仍隔着一个段距`() {
+        val spec = LayoutSpec(
+            viewportWidthPx = 300,
+            viewportHeightPx = 400,
+            marginLeftPx = 0f, marginTopPx = 0f, marginRightPx = 0f, marginBottomPx = 0f,
+            headerHeightPx = 0f, footerHeightPx = 0f,
+            fontSizePx = 20f,
+            lineHeightPx = 40f,
+            paragraphSpacingPx = 20f,
+            titleFontScale = 1f,
+            firstLineIndentEm = 0f,
+        )
+        // 每行 15 字：第一段 10 行正好填满一页，第二段被挤到下一页
+        val content = ChapterContent(
+            listOf(ContentElement.Paragraph("字".repeat(150)), ContentElement.Paragraph("字".repeat(15))),
+        )
+        val pages = Paginator(FakeTextMeasureFacade()).paginate(0, "", content, spec).chapter.pages
+        assertEquals(2, pages.size)
+        val first = RenderablePage(pages[0], measured = emptyMap())
+        val lastLine = pages[0].items.last() as PageItem.TextSlice
+        val nextFirst = pages[1].items.first() as PageItem.TextSlice
+        // ScrollPageReader 把下一页接在 scrollPageHeight(当前页) 处
+        val gap = scrollPageHeight(first) + nextFirst.yTopInPage - (lastLine.yTopInPage + lastLine.height)
+        assertEquals(spec.paragraphSpacingPx, gap, 0.01f)
     }
 
     @Test

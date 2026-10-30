@@ -79,13 +79,16 @@ fun scrollContentTop(layout: LayoutSpec): Float =
 fun scrollContentBottom(layout: LayoutSpec): Float =
     layout.viewportHeightPx - layout.marginBottomPx - layout.footerHeightPx
 
-/** 本页正文实际高度（最后一项底），不是视口高 —— 按视口叠会在页底留一道空白 */
+/** 本页正文实际高度（最后一项底 + 页尾段距），不是视口高 —— 按视口叠会在页底留一道空白 */
 fun pageContentHeight(page: RenderablePage?): Float = scrollPageHeight(page)
 
 /**
  * 滚动叠页高度。没加载出来的图不占位：阅读页现在不会把图填进 [RenderablePage.images]，
  * 分页却按整屏宽的 4:3 留了一大块，叠下一页时就会在正文底下空出半屏。
  * 上滑把后面的字拖上来，下滑又藏回去 —— 就是这块空白在进进出出。
+ *
+ * 页尾段距（[com.radium.inkwell.reader.paginate.PageSpec.trailingGapPx]）要算进来：下一页紧贴着
+ * 这个高度往下接，只量到最后一行的底，恰好在段尾断页时两段就贴在一起，比页内段距窄一截。
  */
 fun scrollPageHeight(page: RenderablePage?): Float {
     if (page == null) return 0f
@@ -107,5 +110,5 @@ fun scrollPageHeight(page: RenderablePage?): Float {
             }
         }
     }
-    return bottom
+    return bottom + page.spec.trailingGapPx
 }
