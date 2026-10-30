@@ -85,7 +85,7 @@ class NetReaderBookSource(
                 chapterIndex = index,
             )
             val content = ChapterContent(remote.elements)
-            store(index, url, content)
+            store(url, content)
             content
         }
     }
@@ -104,7 +104,7 @@ class NetReaderBookSource(
             chapterTitle = chapter.title.orEmpty(),
             chapterIndex = index,
         )
-        store(index, url, ChapterContent(remote.elements))
+        store(url, ChapterContent(remote.elements))
     }
 
     /**
@@ -112,15 +112,13 @@ class NetReaderBookSource(
      *
      * 标记按章节 URL 认行，而不是信传进来的序号：抓一章要好几秒，这期间后台追更可能已经整本换过目录 ——
      * 旧序号上躺着的是另一章，打错了标记，目录里没缓存的章亮着、缓存了的反倒灭着。
-     * 先看库里这个序号上是不是还是这一章（绝大多数时候是，一次主键查询），对不上才整本找一遍。
+     * 一条按 URL 的 UPDATE 搞定：先查后改的两步之间目录照样可能被换掉。
      */
-    private suspend fun store(index: Int, url: String, content: ChapterContent) {
+    private suspend fun store(url: String, content: ChapterContent) {
         if (cacheWritesHeld) return
         withContext(Dispatchers.IO) {
             cache.write(bookId, url, content)
-            val row = if (chapterDao.get(bookId, index)?.url == url) index
-            else chapterDao.getByBook(bookId).firstOrNull { it.url == url }?.index
-            if (row != null) chapterDao.markCached(bookId, row, true)
+            chapterDao.markCachedByUrl(bookId, url, true)
         }
     }
 

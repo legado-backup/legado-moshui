@@ -29,6 +29,10 @@ interface ChapterDao {
     @Query("UPDATE chapter SET isCached = :cached WHERE bookId = :bookId AND `index` = :index")
     suspend fun markCached(bookId: String, index: Int, cached: Boolean)
 
+    /** 按章节 URL 标记：正文缓存本身就是按 URL 存的，同 URL 的行共用同一份缓存 */
+    @Query("UPDATE chapter SET isCached = :cached WHERE bookId = :bookId AND url = :url")
+    suspend fun markCachedByUrl(bookId: String, url: String, cached: Boolean)
+
     @Query("DELETE FROM chapter WHERE bookId = :bookId")
     suspend fun deleteByBook(bookId: String)
 }
