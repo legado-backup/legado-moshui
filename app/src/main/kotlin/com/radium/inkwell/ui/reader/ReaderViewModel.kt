@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.radium.inkwell.core.source.BookSourceEngine
 import com.radium.inkwell.core.source.SearchResult
+import com.radium.inkwell.core.source.SourceVariables
 import com.radium.inkwell.data.db.dao.BookSourceHitDao
 import com.radium.inkwell.data.db.dao.ChapterDao
 import com.radium.inkwell.data.db.entity.BookEntity
@@ -474,7 +475,10 @@ class ReaderViewModel(
                         if (b.newChapterCount > 0) bookRepo.markOpened(bookId)
                     }
                 }
-                NetReaderBookSource(bookId, chapters, rule, engine, contentCache, chapterDao)
+                NetReaderBookSource(
+                    bookId, chapters, rule, engine, contentCache, chapterDao,
+                    bookVariables = SourceVariables.decode(b.variable),
+                )
             } else {
                 withContext(Dispatchers.IO) { LocalReaderBookSource(bookRepo.openLocal(b)) }
             }

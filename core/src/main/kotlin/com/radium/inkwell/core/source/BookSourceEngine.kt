@@ -388,15 +388,10 @@ class BookSourceEngine(
     }
 
     /** 变量表 ↔ JSON（随章节一起落库，见 ChapterEntity.variable） */
-    private fun encodeVars(vars: Map<String, String>): String =
-        if (vars.isEmpty()) "" else VARS_JSON.encodeToString(vars.toMap())
+    private fun encodeVars(vars: Map<String, String>): String = SourceVariables.encode(vars)
 
-    private fun decodeVars(json: String): MutableMap<String, String> {
-        if (json.isBlank()) return java.util.concurrent.ConcurrentHashMap()
-        val map = runCatching { VARS_JSON.decodeFromString<Map<String, String>>(json) }
-            .getOrElse { emptyMap() }
-        return java.util.concurrent.ConcurrentHashMap(map)
-    }
+    private fun decodeVars(json: String): MutableMap<String, String> =
+        java.util.concurrent.ConcurrentHashMap(SourceVariables.decode(json))
 
     private suspend fun collectContent(
         source: BookSourceRule,

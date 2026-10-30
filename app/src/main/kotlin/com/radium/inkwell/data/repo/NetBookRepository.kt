@@ -7,6 +7,7 @@ import com.radium.inkwell.core.source.BookSourceRule
 import com.radium.inkwell.core.source.RemoteBookDetail
 import com.radium.inkwell.core.source.RemoteChapter
 import com.radium.inkwell.core.source.SearchResult
+import com.radium.inkwell.core.source.SourceVariables
 import androidx.room3.withWriteTransaction
 import com.radium.inkwell.data.db.InkwellDb
 import com.radium.inkwell.data.db.dao.BookDao
@@ -37,6 +38,8 @@ class NetBookRepository(
         val toc = engine.getToc(
             rule, detail.tocUrl.ifBlank { bookUrl },
             bookUrl = bookUrl, bookTitle = detail.title, bookAuthor = detail.author.orEmpty(),
+            // 详情页 @put 下的书号之类，目录接口地址要拼它（Legado 挂在 Book 上的那张变量表）
+            variables = detail.variables,
         )
         return detail to toc
     }
@@ -142,7 +145,8 @@ class NetBookRepository(
                     // 和追更攒下来的状态，跟「这本书从哪个源抓的」无关，重新入库必须原样带过来 ——
                     // 否则分组掉回未分组、隐藏的书自己冒回书架、红点被抹平。
                     // 兄弟方法 changeSource 用 fresh.copy 天然保住了它们，就这条路径漏了。
-                    variable = existing?.variable ?: "",
+                    // 书级变量例外：它跟着书源走，这一趟详情刚抓出来的才算数；书源这次没存变量就沿用旧的
+                    variable = SourceVariables.encode(detail.variables).ifEmpty { existing?.variable.orEmpty() },
                     groupName = existing?.groupName ?: "",
                     hidden = existing?.hidden ?: false,
                     newChapterCount = existing?.newChapterCount ?: 0,
@@ -162,6 +166,8 @@ class NetBookRepository(
             bookUrl = book.bookUrl.orEmpty(),
             bookTitle = book.title,
             bookAuthor = book.author.orEmpty(),
+            // 加书架时随书存下的详情页变量：追更不重抓详情，不交回去目录规则的 @get 就全是空串
+            variables = SourceVariables.decode(book.variable),
         )
         check(toc.isNotEmpty()) { "目录解析为空" }
 
@@ -337,6 +343,8 @@ class NetBookRepository(
                     sourceId = newRule.id,
                     bookUrl = newResult.bookUrl,
                     tocUrl = detail.tocUrl.ifBlank { newResult.bookUrl },
+                    // 旧源的变量对新源毫无意义（书号都不是一套），整张换成新源详情页存下的
+                    variable = SourceVariables.encode(detail.variables),
                     totalChapters = toc.size,
                     latestChapterTitle = toc.lastOrNull()?.title,
                     readChapterIndex = newIndex,

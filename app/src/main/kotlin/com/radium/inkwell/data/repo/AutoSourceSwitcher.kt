@@ -115,6 +115,7 @@ class AutoSourceSwitcher(
             rule, detail.tocUrl.ifBlank { hit.bookUrl },
             bookUrl = hit.bookUrl, bookTitle = detail.title.ifBlank { hit.title },
             bookAuthor = detail.author ?: hit.author.orEmpty(),
+            variables = detail.variables,
         )
         if (toc.isEmpty()) return null
 
@@ -139,6 +140,8 @@ class AutoSourceSwitcher(
             chapterIndex = chapter.index,
             bookUrl = hit.bookUrl,
             bookTitle = detail.title.ifBlank { hit.title },
+            // 探测要和真读时同一条路：详情页存的书级变量不交回去，靠它拼地址的源会被误判成抓不下来
+            variables = detail.variables,
         )
         if (content.elements.isEmpty()) return null
 

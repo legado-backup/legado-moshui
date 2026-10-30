@@ -80,6 +80,7 @@ class SourceDetailViewModel(
                     chapterVariable = firstChapter.variable,
                     chapterTitle = firstChapter.title,
                     chapterIndex = firstChapter.index,
+                    variables = detail.variables,
                 )
                 val preview = content.elements
                     .filterIsInstance<com.radium.inkwell.core.model.ContentElement.Paragraph>()

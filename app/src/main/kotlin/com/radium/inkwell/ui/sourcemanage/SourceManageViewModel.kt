@@ -218,7 +218,7 @@ class SourceManageViewModel(
                     return@withTimeout ok(toc = 0, chars = -1, startedAt)
                 }
 
-                val (_, toc) = netBookRepo.fetchDetailAndToc(rule, hit.bookUrl)
+                val (detail, toc) = netBookRepo.fetchDetailAndToc(rule, hit.bookUrl)
                 if (!opts.checkToc && !opts.checkContent) {
                     return@withTimeout ok(toc.size, chars = -1, startedAt)
                 }
@@ -237,6 +237,7 @@ class SourceManageViewModel(
                         engine.getContent(
                             rule, chapter.url, urls, chapter.variable,
                             chapterTitle = chapter.title, chapterIndex = chapter.index,
+                            variables = detail.variables,
                         )
                             .elements
                             .filterIsInstance<ContentElement.Paragraph>()

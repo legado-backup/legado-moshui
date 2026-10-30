@@ -21,6 +21,8 @@ class NetReaderBookSource(
     private val engine: BookSourceEngine,
     private val cache: ChapterContentCache,
     private val chapterDao: ChapterDao,
+    /** 详情页存下的书级变量（BookEntity.variable 解出来的）；正文规则 @get 取不到本章变量时落到这里 */
+    private val bookVariables: Map<String, String> = emptyMap(),
     private val http: OkHttpClient = IMAGE_HTTP,
 ) : ReaderBookSource {
 
@@ -83,6 +85,7 @@ class NetReaderBookSource(
                 chapterVariable = chapter.variable,
                 chapterTitle = chapter.title.orEmpty(),
                 chapterIndex = index,
+                variables = bookVariables,
             )
             val content = ChapterContent(remote.elements)
             store(url, content)
@@ -103,6 +106,7 @@ class NetReaderBookSource(
             allowJsRender = false,
             chapterTitle = chapter.title.orEmpty(),
             chapterIndex = index,
+            variables = bookVariables,
         )
         store(url, ChapterContent(remote.elements))
     }
