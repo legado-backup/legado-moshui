@@ -19,12 +19,27 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         targetSdk = 37
         // 版本号单点配置在 gradle/libs.versions.toml 的 [versions] inkwell
-        // versionCode 忽略预发布后缀（0.1.0-beta.1 与 0.1.0 同码，允许同码覆盖安装）
+        // versionCode = 基础版本 × 1000 + 预发布序号，正式版记 999：
+        //   0.3.12-beta.1 → 312001，0.3.12-beta.2 → 312002，0.3.12 → 312999
+        // 从前预发布后缀被忽略，同一基础版本的所有 beta 与正式版同码。同码允许覆盖安装，于是
+        // beta.3 上装回 beta.1 系统也不拦 —— 旧包的数据库版本更低时，Room 走降级兜底
+        // （fallbackToDestructiveMigrationOnDowngrade）把整个书库静默清空。现在每一版严格递增，
+        // 装回旧包会被系统按降级拒掉。旧方案发出过的最大码是 0.3.11 → 311，新方案任何一版都远大于它。
         val appVersion = libs.versions.inkwell.get()
         versionName = appVersion
-        versionCode = appVersion.substringBefore("-").split(".").let { (major, minor, patch) ->
+        val baseCode = appVersion.substringBefore("-").split(".").let { (major, minor, patch) ->
             major.toInt() * 10000 + minor.toInt() * 100 + patch.toInt()
         }
+        val preRelease = appVersion.substringAfter("-", missingDelimiterValue = "")
+        val preNumber = if (preRelease.isEmpty()) {
+            999
+        } else {
+            // tag 历史里只有 beta.N 一种写法；别的后缀在配置期直接报错，免得悄悄算出一个不递增的码
+            Regex("""beta\.(\d+)""").matchEntire(preRelease)?.groupValues?.get(1)?.toInt()
+                ?.takeIf { it in 1..998 }
+                ?: error("预发布后缀只支持 beta.1 ~ beta.998，实际是「$preRelease」")
+        }
+        versionCode = baseCode * 1000 + preNumber
     }
 
     // 正式签名从环境变量注入（CI 用）；未配置时回落 debug 签名，本地开发无感

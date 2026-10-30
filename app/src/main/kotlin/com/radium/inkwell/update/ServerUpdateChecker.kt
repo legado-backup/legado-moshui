@@ -45,8 +45,9 @@ class ServerUpdateChecker(
                         // has_update 由服务端判定（传了 current 才有）；缺省时保守当作无更新。
                         // 但服务端是拿 tag **字符串**比的：不相等就算「有更新」。正式版渠道的用户装着
                         // 更新的测试版时，会被反复推一个更旧的正式版（下载完装不上：降级）；
-                        // 渠道若回了更旧的预发布版，versionCode 又忽略预发布后缀 —— 0.3.8 会被「升级」成
-                        // 0.3.8-beta.1。所以客户端再按语义化版本比一次，只认真正更新的。
+                        // 渠道若回了更旧的预发布版（0.3.8 上推 0.3.8-beta.1），同样是下完装不上 ——
+                        // versionCode 已把预发布序号算进去，系统会按降级拒掉。所以客户端再按语义化版本
+                        // 比一次，只认真正更新的，别让用户白下一个包。
                         if (dto.hasUpdate == true && UpdateChecker.isNewer(dto.version, versionName)) {
                             CheckResult.Available(dto.toUpdateInfo())
                         } else {

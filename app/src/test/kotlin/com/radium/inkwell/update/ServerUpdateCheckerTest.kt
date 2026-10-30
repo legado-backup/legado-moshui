@@ -48,7 +48,7 @@ class ServerUpdateCheckerTest {
 
     /**
      * 服务端按 tag 字符串比，不相等就回 has_update=true。装着更新的版本时不能被「升级」回旧版：
-     * 0.1.0-beta.63 的 versionCode 与 0.1.0 相同，装得上 —— 那就是一次悄无声息的降级。
+     * 0.1.0-beta.63 比 0.1.0 旧（versionCode 100063 < 100999），推过去只会白下一个装不上的包。
      */
     @Test
     fun `has_update true but not newer is UpToDate`() {
