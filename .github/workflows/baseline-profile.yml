@@ -23,16 +23,16 @@ jobs:
     # 起模拟器 + 装包 + 跑一遍旅程 + R8 重写 profile，整条链比普通 CI 慢一个量级
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       # GitHub 的 Linux runner 有 KVM，但默认权限不让非 root 用户开 /dev/kvm。
       # 没有这段，模拟器会退回软件模拟（慢到超时）或直接起不来。
@@ -77,7 +77,7 @@ jobs:
       # 同一份报告连同设备日志留作 artifact，日志里看不全时下载这个
       - name: Upload test reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: baselineprofile-reports
           path: |

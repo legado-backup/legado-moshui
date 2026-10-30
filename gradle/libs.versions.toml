@@ -1,7 +1,7 @@
 [versions]
 # 应用版本唯一来源：versionCode 由它推导，Release tag 必须与之一致（vX.Y.Z）
 inkwell = "0.3.11"
-agp = "9.4.1"
+agp = "9.5.0"
 kotlin = "2.4.21"
 # KSP 自 2.3.0 起改用独立版本号（不再是「Kotlin版本-KSP版本」）。
 # 2.3.10 起已兼容 Kotlin 2.4 的默认 module name（`${group}:${name}` 里的冒号）。
@@ -46,7 +46,9 @@ jsoup = "1.23.2"
 # Kotlin 2.4 禁止推断带不可见声明的类型 —— 不把注解放进编译 classpath，
 # `selectFirst(...)?.let { }` 这种推断就会炸。compileOnly：只给编译器看，不进包。
 jspecify = "1.0.1"
-rhino = "1.9.1"
+# 1.9.2 起 Rhino 对象默认禁止 Java 序列化。我们只走解释模式（ScriptRuntime 里 optimizationLevel = -1）、
+# 从不序列化 Rhino 对象，不受影响；这一版顺带修了 Object.fromEntries / Math / Generator 几处书源 JS 会踩的行为。
+rhino = "1.9.2"
 juniversalchardet = "2.5.2"
 jsonPath = "3.0.0"
 xpath = "2.5.5"

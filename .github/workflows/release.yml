@@ -13,7 +13,7 @@ jobs:
     env:
       HAS_SIGNING: ${{ secrets.SIGNING_KEYSTORE_BASE64 != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         # 取全量历史与标注 tag 对象：下面要读出 tag 的注解正文当 Release 正文
         with:
           fetch-depth: 0
@@ -27,13 +27,13 @@ jobs:
           fi
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       # Compose 1.13.0-beta01 要求按 37.1 编译。托管镜像通常只有 37.0，缺了 checkAarMetadata 直接失败。
       - name: Install Android SDK platform 37.1
@@ -94,7 +94,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: inkwell-${{ github.ref_name }}.apk
           # 正文只用 tag 注解本身。generate_release_notes 关掉：它会追加一段
