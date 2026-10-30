@@ -30,66 +30,109 @@ object LegadoRuleAnalyzer {
     private fun build(raw: String): RuleNode {
         if (raw.isEmpty()) return RuleNode.Literal("")
         val (afterPut, putSpecs) = peelPut(raw)
-        // Legado 的 Regex 模式（前导 `:`）不把 `##` 当替换指令 —— 那是正则本身的内容，不能剥。
-        val afterPutTrimmed = afterPut.trim()
-        val (core, replace) =
-            if (afterPutTrimmed.startsWith(":")) afterPutTrimmed to null
-            else peelHashReplace(afterPutTrimmed)
-        val node = buildCore(core.trim())
-        val ops = buildList {
-            replace?.let { add(it) }
-            putSpecs.forEach { add(PipeOp.Put(it)) }
-        }
-        return if (ops.isEmpty()) node else RuleNode.Pipe(node, ops)
+        val node = buildCore(afterPut.trim())
+        if (putSpecs.isEmpty()) return node
+        val puts = putSpecs.map { PipeOp.Put(it) }
+        return if (node is RuleNode.Pipe) RuleNode.Pipe(node.source, node.ops + puts) else RuleNode.Pipe(node, puts)
     }
 
     // ---------- <js> / @js: 顺序流水 ----------
 
+    /**
+     * 与 Legado 的 splitSourceRule 同序：**先**按 `<js>…</js>` / `@js:…` 切出脚本段，
+     * `##` 只在脚本段之外的规则段里解析。从前反过来 —— 整条先剥 `##` 再切脚本：
+     * `class.intro@text##简介：@js:result.trim()` 的整个尾巴（连同脚本）成了正则；
+     * `@js:var s='a##b';s` 的脚本被 `##` 拦腰截断。
+     */
     private fun buildCore(s: String): RuleNode =
         if (s.contains("<js>", ignoreCase = true) || s.contains("@js:", ignoreCase = true)) {
             buildJsPipeline(s)
         } else {
-            buildAlternatives(s)
+            buildRuleSegment(s)
         }
 
-    /**
-     * Legado 把规则串按 `<js>` 切成若干段顺序执行：前一段的产物是下一段的输入。
-     * `头<js>脚本</js>尾` = 「先按头规则选出结果 → 跑脚本 → 在脚本产物上再按尾规则求值」。
-     * `头@js:脚本` = 头规则结果喂给脚本（脚本吃到行尾）。
-     */
-    private fun buildJsPipeline(s: String): RuleNode {
-        // @js: 后缀：整行切成 头 + 脚本
-        val jsAt = topLevelIndexOf(s, "@js:")
-        if (jsAt >= 0 && !s.substring(0, jsAt).contains("<js>", ignoreCase = true)) {
-            val head = s.substring(0, jsAt).trim()
-            val script = s.substring(jsAt + 4)
-            return attachJs(head, script, tail = "")
-        }
-        val start = s.indexOf("<js>", ignoreCase = true)
-        if (start < 0) return buildAlternatives(s) // 只剩 @js: 已在上面处理
-        val end = s.indexOf("</js>", start, ignoreCase = true)
-        if (end < 0) {
-            // 未闭合：把 <js> 之后全当脚本，降级但不判死
-            return attachJs(s.substring(0, start).trim(), s.substring(start + 4), tail = "")
-        }
-        val head = s.substring(0, start).trim()
-        val script = s.substring(start + 4, end).trim()
-        val tail = s.substring(end + 5).trim().trimStart('@')
-        return attachJs(head, script, tail)
+    /** 不含脚本的一段规则：剥出尾部 `##` 替换后编译主体 */
+    private fun buildRuleSegment(s: String): RuleNode {
+        val (core, replace) = peelSegmentHash(s)
+        val node = buildAlternatives(core)
+        return if (replace == null) node else RuleNode.Pipe(node, listOf(replace))
     }
 
-    /** 头规则 + 脚本(+ 尾规则)。头为空时脚本作用在页面文本上；尾非空时在脚本产物上再求值。 */
-    private fun attachJs(head: String, script: String, tail: String): RuleNode {
+    /**
+     * Legado 的 Regex 模式（前导 `:`）不把 `##` 当替换指令 —— 那是正则本身的内容，不能剥。
+     * 主体为空的 `##正则`（脚本段后面紧跟的替换）原样返回空主体，由调用方把替换接到上一段的产物上。
+     */
+    private fun peelSegmentHash(s: String): Pair<String, PipeOp?> {
+        val t = s.trim()
+        if (t.startsWith(":")) return t to null
+        val (core, replace) = peelHashReplace(t)
+        return core.trim() to replace
+    }
+
+    /**
+     * Legado 把规则串按 `<js>` / `@js:` 切成若干段顺序执行：前一段的产物是下一段的输入。
+     * `头<js>脚本</js>尾` = 「先按头规则选出结果 → 跑脚本 → 在脚本产物上再按尾规则求值」。
+     * `头@js:脚本` = 头规则结果喂给脚本（脚本吃到行尾）。
+     *
+     * 规则段里的 `##` 只作用于这一段：头段的替换在喂给脚本之前做；脚本之后的 `##正则`（主体为空）
+     * 替换的是脚本产物 —— Legado 里空主体的段不求值、只做替换，语义相同。
+     */
+    private fun buildJsPipeline(s: String): RuleNode {
+        val segments = splitJsSegments(s)
+        var source: RuleNode? = null
         val ops = mutableListOf<PipeOp>()
-        val source: RuleNode = if (head.isEmpty()) {
-            RuleNode.Js(script) // 头为空：脚本吃页面/元素文本
-        } else {
-            ops += PipeOp.Js(script) // 头规则结果喂给脚本
-            buildAlternatives(head)
+        for ((isJs, text) in segments) {
+            if (isJs) {
+                if (source == null) source = RuleNode.Js(text) // 头为空：脚本吃页面/元素文本
+                else ops += PipeOp.Js(text) // 前一段的结果喂给脚本
+                continue
+            }
+            val (core, replace) = peelSegmentHash(text)
+            if (source == null) {
+                // 头规则段。只有 `##` 没有主体时 Legado 不求值、直接替换当前内容，等价于先取上下文原文
+                source = if (core.isEmpty()) RuleNode.Js("result") else buildAlternatives(core)
+            } else {
+                // 脚本之后的尾规则段：在脚本产物上再求值。[PipeOp.Rule] 的规则串由 [RuleEvaluator]
+                // 交回本分析器求值，故直接存原生尾串（去掉 `</js>@` 连接用的前导 `@`）。
+                val tail = core.trimStart('@').trim()
+                if (tail.isNotEmpty()) ops += PipeOp.Rule(tail)
+            }
+            replace?.let { ops += it }
         }
-        // [PipeOp.Rule] 的规则串由 [RuleEvaluator] 交回本分析器求值，故直接存原生尾串。
-        if (tail.isNotEmpty()) ops += PipeOp.Rule(tail)
-        return if (ops.isEmpty()) source else RuleNode.Pipe(source, ops)
+        val head = source ?: return RuleNode.Literal("")
+        return if (ops.isEmpty()) head else RuleNode.Pipe(head, ops)
+    }
+
+    /**
+     * 按脚本段切分：`<js>…</js>` 是一段脚本（未闭合则吃到行尾），顶层 `@js:` 之后整行都是脚本。
+     * 返回 (是否脚本, 文本)；空白的规则段丢弃。
+     */
+    private fun splitJsSegments(s: String): List<Pair<Boolean, String>> {
+        val out = mutableListOf<Pair<Boolean, String>>()
+        var rest = s
+        while (rest.isNotEmpty()) {
+            val jsAt = topLevelIndexOf(rest, "@js:")
+            val blockAt = rest.indexOf("<js>", ignoreCase = true)
+            if (blockAt >= 0 && (jsAt < 0 || blockAt < jsAt)) {
+                rest.substring(0, blockAt).takeIf { it.isNotBlank() }?.let { out += false to it }
+                val end = rest.indexOf("</js>", blockAt + 4, ignoreCase = true)
+                if (end < 0) {
+                    // 未闭合：把 <js> 之后全当脚本，降级但不判死
+                    out += true to rest.substring(blockAt + 4)
+                    break
+                }
+                out += true to rest.substring(blockAt + 4, end).trim()
+                rest = rest.substring(end + 5)
+            } else if (jsAt >= 0) {
+                rest.substring(0, jsAt).takeIf { it.isNotBlank() }?.let { out += false to it }
+                out += true to rest.substring(jsAt + 4)
+                break
+            } else {
+                if (rest.isNotBlank()) out += false to rest
+                break
+            }
+        }
+        return out
     }
 
     // ---------- || 回退 / && 拼接 ----------
@@ -131,7 +174,7 @@ object LegadoRuleAnalyzer {
      *
      * 不用正则 `@put:(\{[^}]+\})`：JSON 值里含 `{{page}}` 这类嵌套花括号时 `[^}]+` 会在第一个
      * `}` 处截断，把 spec 切坏。改成花括号配对扫描（Legado splitPutRule 同思路）。并且**跳过
-     * `<js>…</js>` 段** —— 脚本体里出现的 `@put:` 是脚本内容，不是规则语法。
+     * `<js>…</js>` 段与 `@js:` 之后** —— 脚本体里出现的 `@put:` 是脚本内容，不是规则语法。
      */
     private fun peelPut(rule: String): Pair<String, List<String>> {
         if (!rule.contains("@put:", ignoreCase = true)) return rule to emptyList()
@@ -146,6 +189,11 @@ object LegadoRuleAnalyzer {
                 sb.append(rule, i, stop)
                 i = stop
                 continue
+            }
+            // @js: 之后整行都是脚本（与 Legado 的脚本切分一致），里面的 @put: 同样不是规则语法
+            if (rule.startsWith("@js:", i, ignoreCase = true)) {
+                sb.append(rule, i, rule.length)
+                break
             }
             if (rule.startsWith("@put:", i, ignoreCase = true) && rule.getOrNull(i + 5) == '{') {
                 val close = matchBrace(rule, i + 5)

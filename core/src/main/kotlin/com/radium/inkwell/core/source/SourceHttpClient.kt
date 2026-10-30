@@ -55,7 +55,7 @@ class FetchedPage(
 /**
  * 书源 HTTP 封装：
  * - 默认移动端 Chrome UA（调用方未提供时）
- * - 按 host 的内存 CookieJar
+ * - 内存 CookieJar（按 cookie 的域/路径匹配，整站 cookie 子域名共享，见 [MemoryCookieJar]）
  * - 按 host 的令牌桶限速（suspend delay 实现）
  * - 403/429 指数退避重试 2 次；连接被对端掐断（RST / 半路断流）的 GET 再试 1 次
  * - 每次抓取的结果与失败经 [SourceHttpLogger] 吐出去（app 接到 logcat，开发者模式导出的日志里就有）
@@ -97,7 +97,7 @@ class SourceHttpClient(
     }
 
     fun removeCookie(url: String) {
-        url.toHttpUrlOrNull()?.let { cookieJar.clear(it.host) }
+        url.toHttpUrlOrNull()?.let { cookieJar.clear(it) }
     }
 
     private val buckets = ConcurrentHashMap<String, TokenBucket>()
@@ -365,36 +365,86 @@ class SourceHttpClient(
     }
 }
 
-/** 按 host 的内存 Cookie 存储。host 上限 48，超出按访问顺序淘汰，避免长会话无限涨。 */
-private class MemoryCookieJar : CookieJar {
+/**
+ * 内存 Cookie 存储，语义照 RFC 6265 / OkHttp 的 [Cookie.matches]：域（含 `Domain=.example.com`
+ * 这种整站 cookie）、路径、secure、过期一并判断。只在内存里，不落盘。
+ *
+ * 从前按「精确 host」分桶、只认 48 个 host：
+ * - `www.` 上种下的 `Domain=.example.com` 到了 `m.` 就不带了。反爬站常是「种 cookie → 302 到子域名」，
+ *   子域名见不到 cookie 又种一遍、再跳，循环到重定向上限，书源整个打不开。
+ * - 一次搜索向上百个源扇出，48 个 host 一下就挤满，登录态、验证过的会话被按 LRU 挤掉。
+ *
+ * 现在不按 host 分桶，按条目总数封顶：超出时先清过期的，还不够再淘汰最早种下的。
+ * 同名 + 同域 + 同路径的视为同一个，后种的替换先种的（RFC 6265 §5.3 第 11 步）。
+ */
+internal class MemoryCookieJar(private val maxCookies: Int = MAX_COOKIES) : CookieJar {
 
     private val lock = Any()
-    private val store = object : LinkedHashMap<String, MutableList<Cookie>>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MutableList<Cookie>>?): Boolean =
-            size > 48
-    }
 
-    fun clear(host: String) {
-        synchronized(lock) { store.remove(host) }
+    /** 插入顺序 = 种下的先后（重种的挪到末尾），淘汰从头开始 */
+    private val cookies = LinkedHashMap<String, Cookie>()
+
+    val size: Int get() = synchronized(lock) { cookies.size }
+
+    /** 删掉会发给这个 host 的全部 cookie（脚本的 `cookie.removeCookie(url)`） */
+    fun clear(url: HttpUrl) {
+        synchronized(lock) {
+            cookies.values.removeAll { domainMatches(it, url.host) }
+        }
     }
 
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        val now = System.currentTimeMillis()
         synchronized(lock) {
-            val list = store.getOrPut(url.host) { mutableListOf() }
-            cookies.forEach { c ->
-                list.removeAll { it.name == c.name && it.domain == c.domain && it.path == c.path }
-                list.add(c)
+            for (c in cookies) {
+                val key = keyOf(c)
+                this.cookies.remove(key)
+                // 已过期的 Set-Cookie（Max-Age=0 / 过去的 Expires）就是服务端在删 cookie：删掉旧的、不存新的
+                if (c.expiresAt > now) this.cookies[key] = c
             }
+            if (this.cookies.size > maxCookies) evict(now)
         }
     }
 
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
+        val now = System.currentTimeMillis()
         synchronized(lock) {
-            val list = store[url.host] ?: return emptyList()
-            val now = System.currentTimeMillis()
-            list.removeAll { it.expiresAt < now }
-            return list.filter { it.matches(url) }
+            val out = ArrayList<Cookie>()
+            val it = cookies.values.iterator()
+            while (it.hasNext()) {
+                val c = it.next()
+                if (c.expiresAt <= now) {
+                    it.remove()
+                    continue
+                }
+                if (c.matches(url)) out += c
+            }
+            return out
         }
+    }
+
+    private fun evict(now: Long) {
+        cookies.values.removeAll { it.expiresAt <= now }
+        val it = cookies.values.iterator()
+        while (cookies.size > maxCookies && it.hasNext()) {
+            it.next()
+            it.remove()
+        }
+    }
+
+    /** host-only 的只认同一个 host；整站 cookie 认本域及其子域（与 [Cookie.matches] 的域判定一致） */
+    private fun domainMatches(c: Cookie, host: String): Boolean =
+        if (c.hostOnly) host == c.domain
+        else host == c.domain || (host.endsWith(c.domain) && host[host.length - c.domain.length - 1] == '.')
+
+    private fun keyOf(c: Cookie): String = "${c.name}\u0000${c.domain}\u0000${c.path}"
+
+    companion object {
+        /**
+         * 条目总数上限。正常一个站几个到十几个 cookie，宽搜索扇出几百个源也就一两千条；
+         * 每条几百字节，封顶时不过一两 MB。
+         */
+        const val MAX_COOKIES = 3000
     }
 }
 

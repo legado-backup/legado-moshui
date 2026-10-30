@@ -10,7 +10,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jsoup.Jsoup
 
@@ -51,13 +50,24 @@ data class RemoteBookDetail(
     val coverUrl: String?,
     val intro: String?,
     val tocUrl: String,
+    /**
+     * 详情页规则用 `@put` / `java.put` 存下的**书级**变量。Legado 把它们挂在 Book 上，目录、正文规则的
+     * `@get:{k}` / `java.get(k)` 都取得到（典型：详情页抠出书号，目录接口地址要拼它）。
+     * 调用方随书保存，取目录/正文时经 [BookSourceEngine.getToc] / [BookSourceEngine.getContent] 的
+     * `variables` 交回来；不传这条链路就是断的。
+     */
+    val variables: Map<String, String> = emptyMap(),
 )
 
 data class RemoteChapter(
     val index: Int,
     val title: String,
     val url: String,
-    /** 目录规则用 @put/java.put 存下的变量（JSON）；正文规则会用 @get 取 */
+    /**
+     * 本章的变量（JSON）：目录规则用 @put/java.put 存下的，含 chapterList 那一级存的目录级变量；
+     * 正文规则会用 @get 取。从 `getToc(variables = …)` 传进来、目录阶段没改过的书级变量不在这里重复 ——
+     * 它们随书存一份就够了。
+     */
     val variable: String = "",
 )
 
@@ -111,7 +121,10 @@ class BookSourceEngine(
         jsHttp = jsHttp,
     )
 
-    /** 已确认需要 JS 渲染的书源；后续请求直接走渲染器，省掉每次先静态空跑一遍 */
+    /**
+     * 已确认需要 JS 渲染的「书源 + 阶段」；后续同一级请求先走渲染器，省掉每次先静态空跑一遍。
+     * 按阶段记：正文要渲染的站，目录往往是静态的，不该被连累成每页都等 WebView（见 [withRenderFallback]）。
+     */
     private val needsRender = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /**
@@ -193,7 +206,7 @@ class BookSourceEngine(
             // 详情页解析不出来也不判死：书名/作者在搜索结果里早就拿到了，详情页只是「有就覆盖」。
             // 真正决定这本书能不能读的是目录 —— 让下一步去报错，那才是有信息量的错误。
             // Legado 里 ruleBookInfo 可缺省（详情页即目录页），缺省时直接用详情页地址当目录地址。
-            withRenderFallback(source) { render -> parseDetail(source, url, render) }
+            withRenderFallback(source, "detail") { render -> parseDetail(source, url, render) }
                 ?: RemoteBookDetail(title = "", author = null, coverUrl = null, intro = null, tocUrl = url)
         }
 
@@ -247,20 +260,27 @@ class BookSourceEngine(
             coverUrl = cover?.let { resolveUrl(fetched.finalUrl, it) },
             intro = intro,
             tocUrl = tocUrl,
+            // init 的 @put、各字段脚本里的 java.put 都写在这张表上（init 切换内容时 js 是同一个）
+            variables = js.scriptVars.toMap(),
         )
     }
 
+    /**
+     * @param variables 书级变量（[RemoteBookDetail.variables]）。目录规则的 `@get:{k}` / `java.get(k)`
+     * 先查它；chapterList 那一级 java.put 的值也写进同一张表、跨目录分页保留。
+     */
     suspend fun getToc(
         source: BookSourceRule,
         tocUrl: String,
         bookUrl: String = "",
         bookTitle: String = "",
         bookAuthor: String = "",
+        variables: Map<String, String> = emptyMap(),
     ): List<RemoteChapter> =
         engineIo {
             val rule = source.ruleToc ?: throw SourceException("书源「${source.name}」未配置目录规则")
-            withRenderFallback(source) { render ->
-                collectToc(source, rule, tocUrl, render, bookUrl, bookTitle, bookAuthor)
+            withRenderFallback(source, "toc") { render ->
+                collectToc(source, rule, tocUrl, render, bookUrl, bookTitle, bookAuthor, variables)
             } ?: throw SourceException("目录规则未匹配到章节: $tocUrl")
         }
 
@@ -272,6 +292,7 @@ class BookSourceEngine(
         bookUrl: String,
         bookTitle: String,
         bookAuthor: String,
+        variables: Map<String, String>,
     ): List<RemoteChapter>? {
         // Legado：chapterList 前导 `-` 表示整体倒序
         val listRaw = rule.chapterList.orEmpty().trim()
@@ -283,6 +304,9 @@ class BookSourceEngine(
         resolveUrl(source.baseUrl, tocUrl).takeIf { it.isNotBlank() }?.let { pending.add(it) }
         val visited = HashSet<String>()
         var pages = 0
+        // 目录级变量表：书级变量打底，chapterList / nextTocUrl 上的 java.put、@put 也写在这里。
+        // 整个目录阶段一张、跨分页保留 —— Legado 把这一级的变量存在 Book 上，翻到第二页照样取得到。
+        val tocVars = java.util.concurrent.ConcurrentHashMap(variables)
         // nextTocUrl 在 Legado 里可以一次吐出全部页码（.pages a@href / option@value / JS 数组）。
         // 从前只取第一个：第一个常是「当前页」，visited 一撞就停，目录只剩第一页。
         while (pending.isNotEmpty() && pages < MAX_TOC_PAGES) {
@@ -292,17 +316,22 @@ class BookSourceEngine(
             val fetched = fetchPage(source, url, "toc", render)
             val ctx = pageContext(
                 fetched, varsOf(source),
-                jsContextOf(source, bookUrl = bookUrl, tocUrl = tocUrl, bookName = bookTitle, bookAuthor = bookAuthor),
+                jsContextOf(source, bookUrl = bookUrl, tocUrl = tocUrl, bookName = bookTitle, bookAuthor = bookAuthor)
+                    .copy(scriptVars = tocVars),
             )
             for (item in evalList("toc", listRule, ctx)) {
-                // 每个章节项一份变量表：@put 存的参数属于这一章，不能串到别的章节上
-                val itemCtx = item.copy(js = item.js.copy(scriptVars = java.util.concurrent.ConcurrentHashMap()))
+                // 每个章节项一份变量表：@put 存的参数属于这一章，不能串到别的章节上。
+                // 但要拿目录级变量表打底，而不是一张白纸：chapterList 里 `<js>java.put('bid',…)</js>`
+                // 存下的书号，chapterUrl 的 `@get:{bid}` 要取得到，也要随章节落库给正文用。从前给的是空表，两头都断。
+                val itemCtx = item.copy(js = item.js.copy(scriptVars = java.util.concurrent.ConcurrentHashMap(tocVars)))
                 val title = evalField("toc", "title", rule.chapterName, itemCtx)
                 val chapUrl = evalUrlField("toc", "url", rule.chapterUrl, itemCtx)
                     ?.takeIf { it.isNotBlank() }
                     ?.let { resolveUrl(fetched.finalUrl, it) }
                 if (!title.isNullOrBlank() && !chapUrl.isNullOrBlank() && seenChap.add(chapUrl)) {
-                    collected += Triple(title, chapUrl, encodeVars(itemCtx.js.scriptVars))
+                    // 原样传进来、没被改过的书级变量不进章节：调用方随书存着一份，每章再存一遍只是把库撑大
+                    val own = itemCtx.js.scriptVars.filter { (k, v) -> variables[k] != v }
+                    collected += Triple(title, chapUrl, encodeVars(own))
                 }
             }
             val nexts = rule.nextTocUrl
@@ -326,6 +355,8 @@ class BookSourceEngine(
     /**
      * @param chapterVariable 目录阶段存下的变量（[RemoteChapter.variable]）。正文规则里的
      * `@get:{k}` / `java.get(k)` 要取得到它 —— 不传这条链路就是断的。
+     * @param variables 书级变量（[RemoteBookDetail.variables]）；与本章变量同名时本章的优先
+     * （Legado 的 get 也是先查章节、再查书）。
      */
     suspend fun getContent(
         source: BookSourceRule,
@@ -337,19 +368,20 @@ class BookSourceEngine(
         chapterIndex: Int = 0,
         bookUrl: String = "",
         bookTitle: String = "",
+        variables: Map<String, String> = emptyMap(),
     ): RemoteChapterContent = engineIo {
         val rule = source.ruleContent ?: throw SourceException("书源「${source.name}」未配置正文规则")
         val result = if (allowJsRender) {
-            withRenderFallback(source) { render ->
+            withRenderFallback(source, "content") { render ->
                 collectContent(
                     source, rule, chapterUrl, otherChapterUrls, chapterVariable, render,
-                    chapterTitle, chapterIndex, bookUrl, bookTitle,
+                    chapterTitle, chapterIndex, bookUrl, bookTitle, variables,
                 )
             }
         } else {
             collectContent(
                 source, rule, chapterUrl, otherChapterUrls, chapterVariable, render = false,
-                chapterTitle, chapterIndex, bookUrl, bookTitle,
+                chapterTitle, chapterIndex, bookUrl, bookTitle, variables,
             )
         }
         result ?: throw SourceException("正文规则未匹配到内容: $chapterUrl")
@@ -377,9 +409,11 @@ class BookSourceEngine(
         chapterIndex: Int,
         bookUrl: String,
         bookTitle: String,
+        variables: Map<String, String>,
     ): RemoteChapterContent? {
-        // 净化：源级(replaceRegex) 在前、用户的通用规则在后；正则预编译
-        val sourcePurifier = Purifier.strict(parseReplaceRegex(rule.replaceRegex))
+        // 净化：源级(replaceRegex) 在前、用户的通用规则在后；正则预编译。
+        // 源级规则按 Legado 的容错来：一条写坏的正则退回字面替换，而不是让每一章都打不开（见 [Purifier.legado]）
+        val sourcePurifier = Purifier.legado(parseReplaceRegex(rule.replaceRegex))
         val userPurifier = Purifier.lenient(globalPurify(source))
         val elements = mutableListOf<ContentElement>()
         val firstUrl = resolveUrl(source.baseUrl, chapterUrl)
@@ -387,10 +421,12 @@ class BookSourceEngine(
         var url: String? = firstUrl
         val visited = HashSet<String>()
         var pages = 0
+        // 目录阶段存下的变量在这里喂回脚本：正文规则的 @get:{k} / java.get(k) 靠它。
+        // 书级变量打底、本章变量覆盖；整章一张表，第一页 java.put 的值翻到下一页还在
+        val contentVars = java.util.concurrent.ConcurrentHashMap(variables).apply { putAll(decodeVars(chapterVariable)) }
         while (url != null && pages < MAX_CONTENT_PAGES && visited.add(pageKey(url))) {
             pages++
             val fetched = fetchPage(source, url, "content", render)
-            // 目录阶段存下的变量在这里喂回脚本：正文规则的 @get:{k} / java.get(k) 靠它
             val js = jsContextOf(
                 source,
                 bookUrl = bookUrl,
@@ -398,7 +434,7 @@ class BookSourceEngine(
                 chapterUrl = url,
                 chapterTitle = chapterTitle,
                 chapterIndex = chapterIndex,
-            ).copy(scriptVars = decodeVars(chapterVariable))
+            ).copy(scriptVars = contentVars)
             val ctx = pageContext(fetched, varsOf(source), js)
             val html = evalField("content", "content", rule.content, ctx)
             if (html != null) {
@@ -427,23 +463,38 @@ class BookSourceEngine(
     // ---- JS 渲染回退 ----
 
     /**
-     * 先按已知模式抓一次；解析为空且注入了渲染器时，用 WebView 执行页面 JS 后重试一次。
-     * 一旦确认某书源需要渲染就记住，后续请求直接走渲染器，不再每次先静态空跑。
+     * 先按已知模式抓一次；解析为空且注入了渲染器时，换另一种模式再试一次。
+     * 某一级确认需要渲染就记住（按「书源 + 阶段」），后续同一级先走渲染器，不再每次先静态空跑。
+     *
+     * 记住的只是「先试哪种」，不是「以后只许渲染」。从前一旦记住就只走渲染器、失败即判空：
+     * 站点改版不再需要渲染、或渲染器这次超时，这一级就再也读不出来；而且某一级要渲染，
+     * 详情/目录/正文三级就全被拖进 WebView。现在先试的那种对不上规则，就回头用另一种再抓一遍，
+     * 并按实际成功的那种更新记录 —— 多一次抓取只发生在本来就要失败的路径上。
      *
      * 只用于 detail/toc/content —— 这三级都是用户点开某一本书触发的，慢一点可以接受。
      * 搜索/发现会向上百个书源并发扇出，其中大量是已死站点，逐个渲染会把整次搜索拖垮。
      */
     private suspend fun <T : Any> withRenderFallback(
         source: BookSourceRule,
+        stage: String,
         attempt: suspend (render: Boolean) -> T?,
     ): T? {
-        val known = source.id in needsRender
+        if (renderer == null) return attempt(false)
+        val key = "${source.id}\n$stage"
+        val known = key in needsRender
         attempt(known)?.let { return it }
-        if (known || renderer == null) return null
-        return attempt(true)?.also { needsRender += source.id }
+        val other = attempt(!known) ?: return null
+        if (known) needsRender -= key else needsRender += key
+        return other
     }
 
-    /** render=true 时走 JS 渲染；渲染器缺席或渲染失败时静默退回静态抓取 */
+    /**
+     * render=true 时走 JS 渲染；渲染器缺席或渲染失败时静默退回静态抓取。
+     *
+     * 渲染器只会 GET 一个地址：`,{method/body}` 交给它，POST 与 body 全丢，拿回来的是另一张页面，
+     * 规则自然对不上。所以带 POST/body 的请求一律静态抓（选项照常由 [fetchUrl] 解析），
+     * 交给渲染器的地址也先剥掉 `,{…}` 后缀 —— 留着它，WebView 打开的就是一个必然 404 的废地址。
+     */
     private suspend fun fetchPage(
         source: BookSourceRule,
         url: String,
@@ -451,17 +502,23 @@ class BookSourceEngine(
         render: Boolean,
     ): FetchedPage {
         if (render && renderer != null) {
-            // 源级 header 模板（{{baseUrl}} 等）要用真实变量展开，否则防盗链站拿到空 Referer 会 403
-            val headers = mergeHeaders(source.headers, emptyMap(), varsOf(source))
-            // UA 必须与静态抓取一致：站点常按 UA 给不同 DOM，规则是照静态那份写的
-            val ua = headers.entries.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
-                ?: SourceHttpClient.DEFAULT_UA
-            renderer.render(url, headers, ua)?.let { page ->
-                trace?.onFetch(
-                    FetchTrace(url, "RENDER", page.statusCode, page.finalUrl,
-                        page.detectedCharset, page.bodyText.take(500))
-                )
-                return page
+            val split = splitUrlOptions(url)
+            val opt = split?.second
+            val staticOnly = opt != null && (opt.body != null || (opt.method ?: "GET") != "GET")
+            if (!staticOnly) {
+                val target = split?.first ?: url
+                // 源级 header 模板（{{baseUrl}} 等）要用真实变量展开，否则防盗链站拿到空 Referer 会 403
+                val headers = mergeHeaders(source.headers, opt?.headers.orEmpty(), varsOf(source))
+                // UA 必须与静态抓取一致：站点常按 UA 给不同 DOM，规则是照静态那份写的
+                val ua = headers.entries.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+                    ?: SourceHttpClient.DEFAULT_UA
+                renderer.render(target, headers, ua)?.let { page ->
+                    trace?.onFetch(
+                        FetchTrace(target, "RENDER", page.statusCode, page.finalUrl,
+                            page.detectedCharset, page.bodyText.take(500))
+                    )
+                    return page
+                }
             }
         }
         return fetchUrl(source, url, stage)
@@ -480,39 +537,44 @@ class BookSourceEngine(
     ): FetchedPage {
         // 地址里的 {{}} 同样按 Legado 语义展开（JS 表达式 / 嵌套规则），不只是变量替换
         val urlCtx = urlContext(source, vars)
+        val keyword = vars["keyword"].orEmpty()
 
         // 地址整串可能是 JS（<js>…</js> / @js:…），脚本的返回值才是真地址；
         // 而且地址常自带 ,{method/body/charset/headers} —— 拿到最终地址后才谈得上解析。
-        var rawUrl = evaluator.evalUrlJs(urlTemplate, urlCtx) ?: urlTemplate
-        var method = "GET"
-        var body: String? = null
-        var headers: Map<String, String> = emptyMap()
-        var charset: String? = null
-        splitUrlOptions(rawUrl)?.let { (bare, opt) ->
-            rawUrl = bare
-            opt.method?.let { method = it }
-            opt.body?.let { body = it }
-            opt.charset?.let { charset = it }
-            if (opt.headers.isNotEmpty()) headers = opt.headers
-        }
-        // 非 UTF-8 站点的关键词要按站点编码转义。Legado 地址里关键词写作 {{key}}，
-        // 编码只有拿到 charset 选项后才知道，补上 encode 管道。
-        charset?.lowercase()?.takeIf { it != "utf-8" && it != "utf8" }?.let { cs ->
-            rawUrl = rawUrl.replace("{{key}}", "{{key|encode:$cs}}")
-        }
-        // POST 的 {{key}} 必须在拼进表单之前编码。展开后再按 `&` 切会把「A&B」切成两个字段。
-        if (method.equals("POST", ignoreCase = true)) {
-            body = body?.let { encodeKeyInFormTemplate(it, charset) }
-        }
+        val rawUrl = evaluator.evalUrlJs(urlTemplate, urlCtx) ?: urlTemplate
 
-        val url = resolveUrl(source.baseUrl, evaluator.expandTemplate(rawUrl, urlCtx))
+        // 与 Legado 同序：先展开模板、再解析选项。选项块在展开前常常不是合法 JSON ——
+        // `,{"method":"POST","body":{"page":{{page}}}}` 里的 {{page}} 没有引号。从前先拿 JSON 校验去找选项，
+        // 找不到就整串当 GET 发出去，`,{…}` 原样留在地址里。所以先按花括号配平在结构上切开（[optionsIndex]），
+        // 地址与选项块各自展开：关键词在两边要的转义不一样。
+        val optAt = optionsIndex(rawUrl)
+        val urlPart = if (optAt >= 0) rawUrl.substring(0, optAt) else rawUrl
+        // 选项块里的关键词先换成占位符再展开、解析：原样代入的话，关键词里一个 ' 或 " 就能把 JSON 弄坏。
+        // 解析不出来（展开出的值把 JSON 弄坏了）就当没有选项 —— 无论如何不能让 `,{…}` 进地址
+        val opt = if (optAt >= 0) {
+            parseUrlOptions(evaluator.expandTemplate(markKeyword(rawUrl.substring(optAt + 1)), urlCtx))
+                ?: UrlOptions()
+        } else {
+            UrlOptions()
+        }
+        val method = opt.method ?: "GET"
+        val charset = opt.charset ?: source.charset
+        val body = opt.body?.let { fillKeywordInBody(it, keyword, method, charset) }
+        val headers = opt.headers.mapValues { (_, v) -> v.replace(KEYWORD_MARK, keyword) }
+
+        // 地址里的关键词按站点编码百分号转义，且转成路径、查询串里都安全的形式（见 [encodeUrlComponent]）。
+        // 从前原样代入：`C#` 把后面的 `&page=2` 截成片段，`C++` 到服务端成了空格，`A&B` 被拆成两个字段，
+        // `100%` 是个坏转义；非 UTF-8 站还只认字面的 {{key}}，{{keyword}} 照样按 UTF-8 发。
+        val expanded = evaluator.expandTemplate(markKeyword(urlPart), urlCtx)
+            .replace(KEYWORD_MARK, encodeUrlComponent(keyword, charset))
+        val url = resolveUrl(source.baseUrl, encodeNonAsciiQuery(expanded, charset))
         return doFetch(
             stage = stage,
             url = url,
             method = method,
-            body = body?.let { evaluator.expandTemplate(it, urlCtx) },
+            body = body,
             headers = mergeHeaders(source.headers, headers, vars),
-            charset = charset ?: source.charset,
+            charset = charset,
             rateLimit = source.rateLimit,
         )
     }
@@ -777,7 +839,7 @@ class BookSourceEngine(
 
 /**
  * Legado replaceRegex：多行 `##正则##替换`（或 `正则##替换`），逐行解析为净化规则。
- * 含 JS 的整块忽略（我们的净化不跑脚本）。非法正则由 [Purifier] 兜底跳过。
+ * 含 JS 的整块忽略（我们的净化不跑脚本）。非法正则由 [Purifier.legado] 退回字面替换。
  */
 internal fun parseReplaceRegex(raw: String?): List<PurifyRule> {
     val text = raw?.trim().orEmpty()
@@ -881,45 +943,161 @@ internal data class UrlOptions(
     val headers: Map<String, String> = emptyMap(),
 )
 
-private val optionsJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; isLenient = true }
-
 /**
  * 找到地址里真正开启 `,{…}` 选项块的下标，找不到返回 -1。
  *
  * 不能见到第一个 `,{` 就认 —— 那个 `,{` 可能在 JS 字符串**里面**：
  * `@js:url="https://m.wcxsw.org/search.php,{'body':'…'}"`。所以逐个候选位置试着把 `{…}` 解析成
- * JSON（含单引号→双引号回退），能解析出来的才是真选项。从前 stripUrlOptions 用裸 `indexOf(",{")`
+ * JSON（单引号也认），能解析出来的才是真选项。从前 stripUrlOptions 用裸 `indexOf(",{")`
  * 不验证，把地址从中间截断成 `@js:url="https://m.wcxsw.o`，请求直接 403。
+ *
+ * 都解析不出来时再按结构认一次（[structuralOptionsIndex]）：模板还没展开的选项块不是合法 JSON。
  */
 private fun optionsIndex(url: String): Int {
     var i = url.indexOf(",{")
     while (i > 0) {
-        val text = url.substring(i + 1)
-        val ok = runCatching { optionsJson.parseToJsonElement(text).jsonObject }.getOrNull() != null ||
-            runCatching { optionsJson.parseToJsonElement(text.replace('\'', '"')).jsonObject }.getOrNull() != null
-        if (ok) return i
+        if (parseLenientJsonObject(url.substring(i + 1)) != null) return i
         i = url.indexOf(",{", i + 1)
+    }
+    return structuralOptionsIndex(url)
+}
+
+/**
+ * 结构判据：顶层（不在任何花括号里）的 `,{`，且从它起花括号恰好在串尾配平。不要求是合法 JSON ——
+ * 展开前的 `{"body":{"page":{{page}}}}` 就不是，展开后的值也可能把引号弄坏。
+ *
+ * 真实地址里不会出现裸花括号，能在串尾配平的 `,{…}` 只可能是选项块；JS 字符串里的 `,{…}`（见上）
+ * 后面还跟着脚本，配不到串尾。`,{{page}}` 是模板不是选项块（Legado 的选项恒以单个 `{` 开头）。
+ */
+private fun structuralOptionsIndex(url: String): Int {
+    val s = url.trimEnd()
+    if (!s.endsWith('}')) return -1
+    var depth = 0
+    for (i in s.indices) {
+        when (s[i]) {
+            '{' -> {
+                if (depth == 0 && i > 1 && s[i - 1] == ',' && s.getOrNull(i + 1) != '{' && closesAtEnd(s, i)) {
+                    return i - 1
+                }
+                depth++
+            }
+            '}' -> if (depth > 0) depth--
+        }
     }
     return -1
 }
 
-/** 切出地址尾部的 `,{…}` 选项；无有效选项返回 null。 */
+/** 从 open 处的 `{` 起计数，配平的那个 `}` 是否恰好是串尾 */
+private fun closesAtEnd(s: String, open: Int): Boolean {
+    var depth = 0
+    for (j in open until s.length) {
+        when (s[j]) {
+            '{' -> depth++
+            '}' -> {
+                depth--
+                if (depth == 0) return j == s.length - 1
+            }
+        }
+    }
+    return false
+}
+
+/**
+ * 切出地址尾部的 `,{…}` 选项；地址里没有选项块返回 null。
+ *
+ * 有选项块却解析不出来（展开出的值把 JSON 弄坏之类）时选项作废、照样把地址切出来：
+ * 带着 `,{…}` 去抓只会是一个必然 404 的废地址。
+ */
 internal fun splitUrlOptions(url: String): Pair<String, UrlOptions>? {
     val i = optionsIndex(url)
     if (i < 0) return null
-    val text = url.substring(i + 1)
-    val obj = (runCatching { optionsJson.parseToJsonElement(text).jsonObject }.getOrNull()
-        ?: runCatching { optionsJson.parseToJsonElement(text.replace('\'', '"')).jsonObject }.getOrNull())
-        ?: return null
+    return url.substring(0, i).trim() to (parseUrlOptions(url.substring(i + 1)) ?: UrlOptions())
+}
+
+/** 解析选项块 `{…}`（单引号、不加引号的键都认，见 [parseLenientJsonObject]）；不是 JSON 对象返回 null */
+private fun parseUrlOptions(text: String): UrlOptions? {
+    val obj = parseLenientJsonObject(text) ?: return null
     fun str(k: String) = (obj[k] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
     val hdr = (obj["headers"] as? kotlinx.serialization.json.JsonObject)
         ?.mapValues { (_, v) -> (v as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull.orEmpty() }
         ?.filterValues { it.isNotBlank() }
         .orEmpty()
-    return url.substring(0, i).trim() to UrlOptions(
+    // Legado 的 body 可以直接写成 JSON 对象/数组，发送时序列化成 JSON 文本（UrlOption.getBody 里的 toJson）。
+    // 从前只认字符串，`"body":{"page":1}` 整个被丢掉，POST 发出去的是空 body
+    val body = when (val b = obj["body"]) {
+        null -> null
+        is kotlinx.serialization.json.JsonPrimitive -> b.contentOrNull // 含 JsonNull → null
+        else -> b.toString()
+    }
+    return UrlOptions(
         method = str("method")?.uppercase(),
-        body = str("body"),
+        body = body,
         charset = str("charset"),
         headers = hdr,
     )
+}
+
+// ---- 搜索关键词代入请求 ----
+
+/**
+ * 请求模板里 `{{key}}` / `{{keyword}}` 的占位符。展开前先换成它、展开后再按所在位置换成转义好的关键词：
+ * 地址里要百分号转义，表单里要表单编码，JSON 体里要 JSON 转义 —— 同一个值，三种写法。
+ * 私用区字符：不会出现在真实地址/书源里，也不需要 JSON 转义。
+ *
+ * 只换字面的变量模板；`{{java.encodeURI(key)}}` 这类 JS 表达式拿到的 `key` 仍是原文（与 Legado 一致），
+ * 否则自己转义过的书源会被转两遍。
+ */
+internal val KEYWORD_MARK = Char(0xE000) + "inkwell-keyword" + Char(0xE000)
+
+private val KEYWORD_TEMPLATE = Regex("\\{\\{\\s*(?:key|keyword)\\s*\\}\\}")
+
+internal fun markKeyword(template: String): String =
+    if (!template.contains("{{")) template else KEYWORD_TEMPLATE.replace(template) { KEYWORD_MARK }
+
+private fun charsetOrUtf8(name: String?): java.nio.charset.Charset =
+    name?.takeIf { it.isNotBlank() }?.let { runCatching { charsetOf(it) }.getOrNull() } ?: Charsets.UTF_8
+
+/**
+ * 关键词在地址里的形式：按站点编码百分号转义，路径与查询串里都安全。
+ * URLEncoder 把空格写成 `+`，那只在表单/查询里成立，放进路径就是字面加号，所以换成 `%20`；
+ * 原文里的 `+` 已经先被转成 `%2B`，替换不会误伤。`# & % ? /` 一律转义。
+ */
+internal fun encodeUrlComponent(value: String, charsetName: String?): String =
+    java.net.URLEncoder.encode(value, charsetOrUtf8(charsetName).name()).replace("+", "%20")
+
+/**
+ * 非 UTF-8 站点：查询串里还没转义的非 ASCII 字符按站点编码转义。
+ *
+ * 字面 {{key}} 已在占位符那一步转好了；这一步兜的是 JS 拼出来的地址（`@js:` 地址、`{{'…'+key}}`）——
+ * 原文关键词直接进了地址，交给 OkHttp 会按 UTF-8 编码，GBK 站搜出来全是乱码或空。Legado 也是按
+ * charset 转义查询字段的。只动非 ASCII：已有的 `%XX` 与 ASCII 原样保留，不会转两遍。
+ */
+internal fun encodeNonAsciiQuery(url: String, charsetName: String?): String {
+    val cs = charsetOrUtf8(charsetName)
+    if (cs == Charsets.UTF_8) return url
+    val q = url.indexOf('?')
+    if (q < 0) return url
+    val query = url.substring(q + 1)
+    if (query.all { it.code < 0x80 }) return url
+    return url.substring(0, q + 1) + NON_ASCII_RUN.replace(query) { java.net.URLEncoder.encode(it.value, cs.name()) }
+}
+
+private val NON_ASCII_RUN = Regex("[^\\x00-\\x7F]+")
+
+/**
+ * 请求体里的关键词占位符换成编码好的关键词。
+ * - JSON 体：JSON 字符串转义（关键词里的 `"` `\` 不该把整个请求体弄坏）
+ * - POST 表单：表单编码。必须在拼进表单时做 —— 展开后再按 `&` 切，「A&B」就成了两个字段
+ */
+internal fun fillKeywordInBody(body: String, keyword: String, method: String, charsetName: String?): String {
+    if (!body.contains(KEYWORD_MARK)) return body
+    val t = body.trim()
+    val value = when {
+        t.startsWith("{") || t.startsWith("[") ->
+            kotlinx.serialization.json.JsonPrimitive(keyword).toString().let { it.substring(1, it.length - 1) }
+        method.equals("POST", ignoreCase = true) ->
+            java.net.URLEncoder.encode(keyword, charsetOrUtf8(charsetName).name())
+        else -> keyword
+    }
+    return body.replace(KEYWORD_MARK, value)
 }

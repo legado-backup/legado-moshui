@@ -210,7 +210,7 @@ private class EpubBookHandle(
         ): List<TocEntry> {
             bytes ?: return emptyList()
             val doc = Jsoup.parse(String(bytes, Charsets.UTF_8))
-            val nav = doc.select("nav[epub:type=toc], nav#toc, nav").firstOrNull() ?: return emptyList()
+            val nav = pickTocNav(doc) ?: return emptyList()
             val navDir = navPath.substringBeforeLast('/', "")
             val out = mutableListOf<TocEntry>()
 
@@ -230,6 +230,21 @@ private class EpubBookHandle(
             }
             nav.selectFirst("ol")?.let { walk(it, 0) }
             return out
+        }
+
+        /**
+         * 导航文档里挑目录那个 `<nav>`，按优先级而不是文档顺序：`epub:type` 含 toc → `id="toc"` →
+         * 第一个不是 landmarks / page-list 的 nav。
+         *
+         * 从前一条并集选择器取 first：Jsoup 的并集按**文档顺序**返回，排在前面的 landmarks（「封面」
+         * 「正文开始」两三项）或 page-list（页码表）就顶替了真目录 —— 整本书的目录只剩两三条，或成了一串页码。
+         */
+        private fun pickTocNav(doc: Document): Element? {
+            val navs = doc.select("nav")
+            fun types(nav: Element) = nav.attr("epub:type").split(Regex("\\s+")).filter { it.isNotBlank() }
+            return navs.firstOrNull { "toc" in types(it) }
+                ?: navs.firstOrNull { it.id() == "toc" }
+                ?: navs.firstOrNull { nav -> types(nav).none { it == "landmarks" || it == "page-list" } }
         }
 
         private fun parseNcx(

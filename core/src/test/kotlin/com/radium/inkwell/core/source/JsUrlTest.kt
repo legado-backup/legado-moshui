@@ -90,6 +90,20 @@ class JsUrlTest {
     }
 
     /**
+     * kotlinx 的 lenient 模式会把 `'charset'` 连引号一起当裸字符串收下，键成了 `'charset'`。
+     * 从前只有 body 里恰好带着 `{{key}}`（花括号让 lenient 解析失败、走到换引号那步）才认得出来。
+     */
+    @Test
+    fun `单引号选项里没有模板时也认得出键`() {
+        val (_, opt) = assertNotNull(splitUrlOptions("""/s?q=1,{'charset':'gbk','method':'post'}"""))
+        assertEquals("gbk", opt.charset)
+        assertEquals("POST", opt.method)
+        // 单引号包着 JSON 的 body
+        val (_, json) = assertNotNull(splitUrlOptions("""/s,{'method':'POST','body':'{"a":"it\'s"}'}"""))
+        assertEquals("""{"a":"it's"}""", json.body)
+    }
+
+    /**
      * 这条是真实事故：`,{` 落在 JS 字符串里面。从前见到第一个 `,{` 就切，
      * 把地址拦腰截成 `@js:url="https://m.wcxsw.o`，请求 403。
      */

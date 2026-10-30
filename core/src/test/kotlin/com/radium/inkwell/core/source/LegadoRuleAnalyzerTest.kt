@@ -176,4 +176,48 @@ class LegadoRuleAnalyzerTest {
             LegadoRuleAnalyzer.analyze("class.book@data-id@put:{\"p\":\"{{page}}\"}"), item)
         assertEquals("3", item.js.scriptVars["p"])
     }
+
+    // ---- @put 的 Legado 文档写法：键不加引号 / 单引号 ----
+
+    @Test fun `put spec with unquoted keys or single quotes`() {
+        fun item() = EvalContext(
+            Jsoup.parse(html, "https://ex.com/").selectFirst("div.book")!!, null, "https://ex.com/",
+            js = JsContext())
+        val unquoted = item()
+        ev.evalToString(LegadoRuleAnalyzer.analyze("class.book@data-id@put:{bid:\"@data-id\"}"), unquoted)
+        assertEquals("42", unquoted.js.scriptVars["bid"])
+        val single = item()
+        ev.evalToString(LegadoRuleAnalyzer.analyze("class.book@data-id@put:{'bid':'@data-id'}"), single)
+        assertEquals("42", single.js.scriptVars["bid"])
+    }
+
+    // ---- 先切脚本段、再在规则段里解析 ## ----
+
+    @Test fun `hash replace before at-js applies to the head, script still runs`() {
+        assertEquals("天蚕土豆!", str("class.author.0@text##作者：@js:result+'!'"))
+    }
+
+    @Test fun `hash replace before js block applies to the head, script still runs`() {
+        assertEquals("天蚕土豆?", str("class.author.0@text##作者：<js>result+'?'</js>"))
+    }
+
+    @Test fun `hashes inside at-js body do not cut the script`() {
+        assertEquals("a##b", str("@js:var s='a##b';s"))
+    }
+
+    @Test fun `hash replace after js block applies to the script output`() {
+        assertEquals("正文", str("<js>'广告正文'</js>##广告"))
+    }
+
+    // ---- JSON 对象/数组给脚本、正则的是真 JSON，不是 Map.toString ----
+
+    @Test fun `json list item is real json text for js and regex`() {
+        val page = jsonCtx("""{"data":{"list":[{"id":1,"title":"甲"},{"id":2,"title":"乙"}]}}""")
+        val items = ev.evalToNodes(LegadoRuleAnalyzer.analyze("$.data.list[*]"), page)
+        assertEquals(2, items.size)
+        assertEquals("甲", ev.evalToString(LegadoRuleAnalyzer.analyze("<js>JSON.parse(result).title</js>"), items[0]))
+        assertEquals("乙", ev.evalToString(LegadoRuleAnalyzer.analyze(":\"title\":\"([^\"]+)\""), items[1]))
+        // 取整个对象：拿到的是 JSON，不是 {id=1, title=甲}
+        assertEquals("""{"id":1,"title":"甲"}""", ev.evalToString(LegadoRuleAnalyzer.analyze("$.data.list[0]"), page))
+    }
 }

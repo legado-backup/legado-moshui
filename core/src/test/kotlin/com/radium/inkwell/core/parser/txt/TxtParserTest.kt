@@ -81,4 +81,42 @@ class TxtParserTest {
         val content = handle.loadChapter(1)
         assertEquals(3, content.elements.size)
     }
+
+    // ---- 拆章按偏移扫描、正文流式解码：结果必须与从前逐行 substring().trim() 完全一致 ----
+
+    @Test
+    fun `CRLF 与全角空白包着的标题照样识别，取 trim 后的文本`() {
+        val text = buildString {
+            append("　　\r\n") // 只有空白的开头：不成「前言」章
+            for (c in 1..4) {
+                append("　第${c}章 标题$c  \r\n")
+                append("　　" + "正文内容。".repeat(60) + "\r\n")
+            }
+        }
+        val handle = TxtParser().open(openTemp(text))
+        assertEquals((1..4).map { "第${it}章 标题$it" }, handle.chapters.map { it.title })
+        // 标题行仍被识别为本章首行剔掉，只剩那一段正文
+        assertEquals(1, handle.loadChapter(0).elements.size)
+    }
+
+    @Test
+    fun `UTF-16 带 BOM 的文件流式解码`() {
+        val handle = TxtParser().open(
+            openTemp(novel(), charset = Charsets.UTF_16LE, bom = byteArrayOf(0xFF.toByte(), 0xFE.toByte()))
+        )
+        assertEquals("第1章 风起云涌之1", handle.chapters[1].title)
+    }
+
+    @Test
+    fun `超过探测样本的大文件逐块解码，跨块的多字节字符不被切坏`() {
+        // GBK 下约 600KB，远超 64KB 探测样本与 64K 字符的读缓冲
+        val text = novel(chapters = 300, paraPerChapter = 10)
+        val handle = TxtParser().open(openTemp(text, charset = charset("GBK")))
+        assertEquals(301, handle.chapters.size)
+        assertEquals("第300章 风起云涌之300", handle.chapters[300].title)
+        val last = handle.loadChapter(300).elements
+            .map { (it as com.radium.inkwell.core.model.ContentElement.Paragraph).text }
+        assertEquals(10, last.size)
+        assertTrue(last.all { it.startsWith("这是第300章的第") && it.endsWith("情节发展。") }, "实际: $last")
+    }
 }

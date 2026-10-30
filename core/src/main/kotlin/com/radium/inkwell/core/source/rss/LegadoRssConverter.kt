@@ -1,5 +1,6 @@
 package com.radium.inkwell.core.source.rss
 
+import com.radium.inkwell.core.source.LEGADO_ITEM_SEPARATOR
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -88,7 +89,7 @@ object LegadoRssConverter {
      */
     private fun parseSorts(raw: String?): List<RssSort> {
         if (raw.isNullOrBlank()) return emptyList()
-        return raw.split(SORT_SEPARATOR).mapNotNull { line ->
+        return raw.split(LEGADO_ITEM_SEPARATOR).mapNotNull { line ->
             val t = line.trim()
             if (t.isEmpty()) return@mapNotNull null
             val idx = t.indexOf("::")
@@ -111,6 +112,4 @@ object LegadoRssConverter {
 
     private fun JsonObject.bool(key: String): Boolean? =
         (this[key] as? JsonPrimitive)?.booleanOrNull
-
-    private val SORT_SEPARATOR = Regex("(&&|\\r?\\n)+")
 }

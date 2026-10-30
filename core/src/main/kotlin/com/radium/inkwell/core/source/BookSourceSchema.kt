@@ -176,9 +176,12 @@ internal fun parseConcurrentRate(raw: String?): RateLimitRule? {
 
 /**
  * 解析 exploreUrl 为发现页列表。支持 Legado 两种写法：
- * - 多行 `名称::地址`
+ * - `名称::地址`，项之间用换行**或 `&&`** 分隔（Legado 按 `(&&|\n)+` 拆）
  * - JSON 数组 `[{"title":"…","url":"…"}, …]`
  * 动态地址（`<js>`/`@js:`/整串是表达式）无法静态列举，返回空。
+ *
+ * 从前只按换行拆：写成一行的 `玄幻::/a/{{page}}&&武侠::/b/{{page}}` 只剩一个分类，
+ * 地址还是 `/a/{{page}}&&武侠::/b/{{page}}` 这么一长串拼起来的废地址。
  */
 internal fun parseExplore(raw: String?, enabled: Boolean): List<ExploreItem> {
     if (!enabled) return emptyList()
@@ -196,7 +199,7 @@ internal fun parseExplore(raw: String?, enabled: Boolean): List<ExploreItem> {
             if (name.isEmpty() || url.isEmpty()) null else ExploreItem(name, url)
         }
     }
-    return t.lines().mapNotNull { line ->
+    return t.split(LEGADO_ITEM_SEPARATOR).mapNotNull { line ->
         val s = line.trim().trimEnd('&')
         if (s.isEmpty()) return@mapNotNull null
         val sep = s.indexOf("::")
@@ -204,3 +207,9 @@ internal fun parseExplore(raw: String?, enabled: Boolean): List<ExploreItem> {
         ExploreItem(s.substring(0, sep).trim(), s.substring(sep + 2).trim())
     }
 }
+
+/**
+ * Legado 分类列表（发现页 exploreUrl、订阅源 sortUrl）的项分隔符：换行或 `&&`，连续的算一个。
+ * 换行含单独的 `\r`：从前按 `lines()` 拆的 exploreUrl 认它，别在这里丢了。
+ */
+internal val LEGADO_ITEM_SEPARATOR = Regex("(&&|\\r\\n?|\\n)+")

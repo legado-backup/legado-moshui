@@ -34,18 +34,17 @@ object TxtChapterSplitter {
     )
 
     fun split(text: String, config: Config = Config()): List<Split> {
-        val lines = scanLines(text)
+        // 超过标题长度上限的行永远不可能是标题，扫描时就不收
+        val lines = scanLines(text, config.maxTitleLength)
 
         config.customPattern?.let { custom ->
-            val hits = lines.filter { it.content.length <= config.maxTitleLength && custom.matches(it.content) }
+            val hits = lines.filter { custom.matches(it.content) }
             if (hits.isNotEmpty()) return buildSplits(text, hits, emptySet())
         }
 
         for (rules in candidateRules) {
             val main = rules.first()
-            val hits = lines.filter { line ->
-                line.content.length <= config.maxTitleLength && rules.any { it.matches(line.content) }
-            }
+            val hits = lines.filter { line -> rules.any { it.matches(line.content) } }
             val mainHits = hits.count { main.matches(it.content) }
             if (mainHits >= config.minMatches && distributionSane(hits, text.length)) {
                 val volumeLines = if (VOLUME in rules) {
@@ -58,17 +57,32 @@ object TxtChapterSplitter {
         return fallbackSplit(text, config.fallbackSliceChars)
     }
 
-    private data class Line(val content: String, val start: Int, val end: Int)
+    /**
+     * 一行的位置：[start] 是整行起点（章节区间从这里切），[content] 是去掉首尾空白后的视图。
+     *
+     * 内容是**视图不是拷贝**：从前每个非空行都 `substring` 一份再 `trim` 一份、整张表撑到拆章结束，
+     * 等于把全文又复制了一遍（大 txt 的峰值内存就这么翻上去的）。现在只记偏移，标题文本到建章时才取出来。
+     */
+    private class Line(private val text: String, val start: Int, private val from: Int, private val to: Int) {
+        val content: CharSequence get() = java.nio.CharBuffer.wrap(text, from, to)
+        fun title(): String = text.substring(from, to)
+    }
 
-    private fun scanLines(text: String): List<Line> {
+    /**
+     * 逐行扫描，只收 trim 后非空且不长于 [maxLength] 的行。trim 判据与 `String.trim()` 一致（[Char.isWhitespace]），
+     * 行尾的 `\r` 也在其中 —— 拆章结果与从前逐行 `substring().trim()` 完全相同。
+     */
+    private fun scanLines(text: String, maxLength: Int): List<Line> {
         val lines = mutableListOf<Line>()
         var start = 0
         while (start < text.length) {
             var end = text.indexOf('\n', start)
             if (end < 0) end = text.length
-            val raw = text.substring(start, end)
-            val trimmed = raw.trim().trimEnd('\r')
-            if (trimmed.isNotEmpty()) lines += Line(trimmed, start, end)
+            var from = start
+            var to = end
+            while (from < to && text[from].isWhitespace()) from++
+            while (to > from && text[to - 1].isWhitespace()) to--
+            if (to > from && to - from <= maxLength) lines += Line(text, start, from, to)
             start = end + 1
         }
         return lines
@@ -82,15 +96,15 @@ object TxtChapterSplitter {
 
     private fun buildSplits(text: String, hits: List<Line>, volumeStarts: Set<Int>): List<Split> {
         val splits = mutableListOf<Split>()
-        // 第一个标题前的内容作为"前言"章
-        if (hits.first().start > 0) {
-            val head = text.substring(0, hits.first().start)
-            if (head.isNotBlank()) splits += Split("前言", 0, hits.first().start)
+        // 第一个标题前的内容作为"前言"章（判空白不必先把这一大段拷出来）
+        val firstStart = hits.first().start
+        if (firstStart > 0 && (0 until firstStart).any { !text[it].isWhitespace() }) {
+            splits += Split("前言", 0, firstStart)
         }
         hits.forEachIndexed { i, line ->
             val end = if (i + 1 < hits.size) hits[i + 1].start else text.length
             splits += Split(
-                title = line.content,
+                title = line.title(),
                 start = line.start,
                 end = end,
                 level = if (line.start in volumeStarts) 0 else 1,

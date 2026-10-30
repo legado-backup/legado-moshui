@@ -20,6 +20,8 @@ object EpubFixture {
         encryptionAlgorithm: String? = null,
         /** NCX 的 content src 带 `#锚点`（calibre / Sigil 常见写法） */
         ncxAnchors: Boolean = false,
+        /** nav.xhtml 里目录前面先放 landmarks 与 page-list 两个 nav（文档顺序在前） */
+        navExtrasFirst: Boolean = false,
     ) {
         ZipOutputStream(file.outputStream()).use { zip ->
             fun put(name: String, content: String) {
@@ -105,10 +107,13 @@ object EpubFixture {
                 val lis = (1..chapterCount).joinToString("") { i ->
                     """<li><a href="text/ch$i.xhtml">Nav第${i}章</a></li>"""
                 }
+                val extras = if (!navExtrasFirst) "" else
+                    """<nav epub:type="landmarks"><ol><li><a epub:type="bodymatter" href="text/ch1.xhtml">正文开始</a></li></ol></nav>
+                    <nav epub:type="page-list"><ol><li><a href="text/ch2.xhtml">12</a></li></ol></nav>"""
                 put(
                     "OEBPS/nav.xhtml",
                     """<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
-                    <body><nav epub:type="toc"><ol>$lis</ol></nav></body></html>""",
+                    <body>$extras<nav epub:type="toc"><ol>$lis</ol></nav></body></html>""",
                 )
             }
         }

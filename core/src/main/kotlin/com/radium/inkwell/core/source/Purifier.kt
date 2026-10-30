@@ -14,6 +14,8 @@ class Purifier private constructor(
     private val compiled: List<Compiled>,
     /** 宽松模式：运行期某条规则抛错（非法组引用/灾难回溯）时吞掉、保留原文；严格模式转 SourceException */
     private val lenient: Boolean,
+    /** Legado 模式：运行期某条正则抛错时退回按字面替换（先于 [lenient] 判断） */
+    private val literalFallback: Boolean = false,
 ) {
 
     val isEmpty: Boolean get() = compiled.isEmpty()
@@ -100,7 +102,8 @@ class Purifier private constructor(
             // 后面每条规则都会立刻再超时一次，最后静默返回原文 —— 用户只会看到"我的净化规则
             // 怎么不生效了"，永远查不到原因。与本项目「catch 前先 rethrow 取消」同一个道理。
             if (e is RegexBudgetExceeded) throw PurifyTimeoutException()
-            if (lenient) acc
+            if (literalFallback) p.applyLiteral(acc)
+            else if (lenient) acc
             else throw SourceException("净化规则执行失败: ${p.pattern}", e)
         }
     }
@@ -121,10 +124,16 @@ class Purifier private constructor(
         fun apply(text: String, budget: Budget): String =
             regex?.replace(GuardedText(text, budget), replacement)
                 ?: text.replace(literal, replacement)
+
+        /** 按字面替换（替换串也按字面，`$` 不是组引用） */
+        fun applyLiteral(text: String): String = text.replace(literal, replacement)
     }
 
     companion object {
-        /** 书源自带的规则：编译不过就是硬错 —— 那是书源坏了，得让用户看见 */
+        /**
+         * 编译不过就是硬错。给替换规则编辑器做校验用：用户正在写的规则写错了，得当场让他看见。
+         * 抓正文时的书源规则别用它，见 [legado]。
+         */
         fun strict(rules: List<PurifyRule>): Purifier = Purifier(
             rules.map {
                 try {
@@ -134,6 +143,26 @@ class Purifier private constructor(
                 }
             },
             lenient = false,
+        )
+
+        /**
+         * 书源 `ruleContent.replaceRegex` 的语义，与 Legado 的 AnalyzeRule.replaceRegex 一致：
+         * 正则编译不过（`##(广告`、`##*广告*`），或替换串里的 `$` 是非法组引用，就退回**按字面替换**。
+         *
+         * 从前这里用 [strict]：一条写坏的正则抛成 SourceException，整本书**每一章**都打不开，
+         * 还会触发自动换源 —— 而同一个书源在阅读 APP 里只是那条广告没删掉。超时不在退回之列：
+         * 病态正则照样撞预算、整章按未净化返回，看门狗与预算一点不放松。
+         */
+        fun legado(rules: List<PurifyRule>): Purifier = Purifier(
+            rules.map { rule ->
+                try {
+                    Compiled(rule)
+                } catch (_: Exception) {
+                    Compiled(rule.copy(isRegex = false))
+                }
+            },
+            lenient = true,
+            literalFallback = true,
         )
 
         /**

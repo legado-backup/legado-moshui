@@ -233,7 +233,16 @@ class RuleEvaluator(
         else -> listOf(scalarString(value)).filter { it.isNotEmpty() }
     }
 
-    private fun scalarString(v: Any): String = if (v is String) v else v.toString()
+    /**
+     * jayway 读出来的对象/数组是 LinkedHashMap / List，`toString()` 得到的是 `{id=1, name=x}` ——
+     * 不是 JSON。`$.data.list[*]` 的条目交给 `<js>JSON.parse(result).title</js>`、`:regex`、`$.obj`
+     * 取整个对象，拿到的都是这种半截东西。对象/数组一律序列化成真正的 JSON 文本。
+     */
+    private fun scalarString(v: Any): String = when (v) {
+        is String -> v
+        is Map<*, *>, is List<*> -> jsonText(v)
+        else -> v.toString()
+    }
 
     // ---- regex ----
 
@@ -394,12 +403,15 @@ class RuleEvaluator(
     private fun isBareGetRule(rule: String): Boolean =
         GET_VAR.matchEntire(rule.trim()) != null
 
-    /** `@put:{"k":"规则"}`：每条规则在当前内容上求值，结果存进变量表 */
+    /**
+     * `@put:{"k":"规则"}`：每条规则在当前内容上求值，结果存进变量表。
+     *
+     * spec 按宽松 JSON 解析（键不加引号、单引号都认，见 [parseLenientJsonObject]）：Legado 文档里的写法就是
+     * `@put:{bid:"//book/@bid"}`，书源里单引号也常见。
+     * 从前按严格 JSON 解析，这两种都解析失败、被静默丢掉，后面的 `@get:{bid}` 永远取空。
+     */
     private fun applyPut(spec: String, ctx: EvalContext) {
-        val obj = runCatching {
-            kotlinx.serialization.json.Json.parseToJsonElement(spec)
-                    as kotlinx.serialization.json.JsonObject
-        }.getOrNull() ?: return
+        val obj = parseLenientJsonObject(spec) ?: return
         for ((key, value) in obj) {
             val ruleText = (value as? kotlinx.serialization.json.JsonPrimitive)?.content ?: continue
             val v = runCatching {
@@ -422,12 +434,12 @@ class RuleEvaluator(
      * 引号被规范化、标签被重新缩进，照着网页源码写的正则也对不上。
      *
      * 元素上下文（列表项、选择器结果）没有原文可给，取 outerHtml（可匹配属性与脚本内容）；
-     * 其余取 JSON/文本值。
+     * 其余取 JSON/文本值 —— JSON 对象/数组给序列化后的 JSON 文本，不是 Map 的 toString（见 [scalarString]）。
      */
     private fun contextText(ctx: EvalContext): String {
         val raw = ctx.json as? String
         if (raw != null && ctx.element is Document) return raw
-        return ctx.element?.outerHtml() ?: raw ?: ctx.json?.toString() ?: ""
+        return ctx.element?.outerHtml() ?: raw ?: ctx.json?.let { scalarString(it) } ?: ""
     }
 
     // ---- 管道 ----
@@ -528,6 +540,79 @@ class RuleEvaluator(
                     .toTypedArray()
             }.getOrDefault(emptyArray())
     }
+}
+
+// ---- JSON 工具 ----
+
+/** `@put` spec、地址选项用：宽松模式接受不加引号的键（Legado 文档写法） */
+private val LENIENT_JSON = kotlinx.serialization.json.Json { isLenient = true }
+
+/**
+ * 书源里手写的 JSON 对象（`@put:{…}`、地址的 `,{…}` 选项）：键可以不加引号，字符串可以用单引号 ——
+ * Legado 用 GSON 的 lenient 模式解析，这些都认。解析不成对象返回 null。
+ *
+ * 不能「先按原文解析、失败再把单引号换成双引号」：kotlinx 的 lenient 模式会把 `'bid'` 当成
+ * **连引号一起**的裸字符串照单全收，解析「成功」了，键却是 `'bid'`，后面按 `bid` 取永远是空 ——
+ * `,{'charset':'gbk'}` 的编码、`@put:{'bid':'…'}` 的变量就是这么无声无息丢掉的。所以先规整引号再解析。
+ */
+internal fun parseLenientJsonObject(text: String): kotlinx.serialization.json.JsonObject? =
+    runCatching { LENIENT_JSON.parseToJsonElement(singleToDoubleQuotes(text)) as? kotlinx.serialization.json.JsonObject }
+        .getOrNull()
+        ?: runCatching { LENIENT_JSON.parseToJsonElement(text) as? kotlinx.serialization.json.JsonObject }.getOrNull()
+
+/**
+ * 单引号字符串 → JSON 双引号字符串。双引号串原样保留（里面的 `'` 是内容）；单引号串里的 `"` 转义、
+ * `\'` 还原成 `'`。比裸 `replace('\'', '"')` 多认一种常见写法：`{'body':'{"a":1}'}` 这种单引号包着 JSON 的。
+ */
+private fun singleToDoubleQuotes(text: String): String {
+    if ('\'' !in text) return text
+    val sb = StringBuilder(text.length + 8)
+    var i = 0
+    while (i < text.length) {
+        when (text[i]) {
+            '"' -> {
+                val start = i++
+                while (i < text.length && text[i] != '"') i += if (text[i] == '\\') 2 else 1
+                i = minOf(i + 1, text.length)
+                sb.append(text, start, i)
+            }
+            '\'' -> {
+                sb.append('"')
+                i++
+                while (i < text.length && text[i] != '\'') {
+                    val c = text[i]
+                    when {
+                        c == '\\' && i + 1 < text.length -> {
+                            if (text[i + 1] == '\'') sb.append('\'') else sb.append(c).append(text[i + 1])
+                            i += 2
+                            continue
+                        }
+                        c == '"' -> sb.append("\\\"")
+                        else -> sb.append(c)
+                    }
+                    i++
+                }
+                sb.append('"')
+                i++
+            }
+            else -> sb.append(text[i++])
+        }
+    }
+    return sb.toString()
+}
+
+/** jayway 解析出的 Map/List/标量 → JSON 文本（键序保持；数字、布尔原样，其余按字符串） */
+private fun jsonText(v: Any): String = toJsonElement(v).toString()
+
+private fun toJsonElement(v: Any?): kotlinx.serialization.json.JsonElement = when (v) {
+    null -> kotlinx.serialization.json.JsonNull
+    is Map<*, *> -> kotlinx.serialization.json.JsonObject(
+        v.entries.associate { (k, x) -> k.toString() to toJsonElement(x) }
+    )
+    is List<*> -> kotlinx.serialization.json.JsonArray(v.map { toJsonElement(it) })
+    is Number -> kotlinx.serialization.json.JsonPrimitive(v)
+    is Boolean -> kotlinx.serialization.json.JsonPrimitive(v)
+    else -> kotlinx.serialization.json.JsonPrimitive(v.toString())
 }
 
 // ---- 模板与编码工具（引擎/HTTP 层共用） ----

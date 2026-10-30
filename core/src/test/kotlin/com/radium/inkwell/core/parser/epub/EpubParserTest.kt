@@ -52,6 +52,16 @@ class EpubParserTest {
         }
     }
 
+    /** landmarks / page-list 排在目录前面时，取的仍是 epub:type="toc" 那个 nav，而不是文档里第一个 */
+    @Test
+    fun `nav toc is picked by type, not document order`() {
+        val f = temp()
+        EpubFixture.minimalEpub(f, withNav = true, navExtrasFirst = true)
+        EpubParser().open(f).use { book ->
+            assertEquals(listOf("Nav第1章", "Nav第2章", "Nav第3章"), book.toc.map { it.title })
+        }
+    }
+
     @Test
     fun `href case mismatch is tolerated`() {
         val f = temp()

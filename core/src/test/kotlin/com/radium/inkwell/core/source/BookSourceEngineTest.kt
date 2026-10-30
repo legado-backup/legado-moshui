@@ -394,6 +394,9 @@ class BookSourceEngineTest {
                 path == "/dup/2" -> html(DUP_LAST)
                 path.startsWith("/list/") -> html(EXPLORE_PAGE)
                 path == "/s" || path.startsWith("/s?") -> html(SEARCH_PAGE)
+                path.startsWith("/so/") -> html(SEARCH_PAGE)
+                // 静态抓下来正文是空的（要 JS 渲染才有）
+                path == "/js/chap" -> html("""<html><body><div id="content"></div></body></html>""")
                 path == "/mp/toc" -> html(MP_TOC_1)
                 path == "/mp/toc2" -> html(MP_TOC_2)
                 path == "/mp/toc3" -> html(MP_TOC_3)
@@ -537,6 +540,214 @@ class BookSourceEngineTest {
         assertEquals("q={{key|encode}}", encodeKeyInFormTemplate("q={{key}}", null))
         assertEquals("q={{key|encode:gbk}}", encodeKeyInFormTemplate("q={{key}}", "gbk"))
         assertEquals("""{"q":"{{key}}"}""", encodeKeyInFormTemplate("""{"q":"{{key}}"}""", "UTF-8"))
+    }
+
+    // ---- 搜索地址里的关键词转义 ----
+
+    private fun searchSource(searchUrl: String) = BookSourceRule.fromJson(
+        """{"bookSourceUrl":"$base","bookSourceName":"编码站",
+            "searchUrl":${kotlinx.serialization.json.JsonPrimitive(searchUrl)},
+            "ruleSearch":{"bookList":"div.result","name":"h3 a@text","bookUrl":"h3 a@href"}}"""
+    )
+
+    /**
+     * GET 地址里的关键词从前原样代入：`C#` 把后面的 `&page=` 截成了片段，`C++` 到服务端成了空格，
+     * `A&B` 被拆成两个字段，`100%` 是个坏转义。
+     */
+    @Test
+    fun `GET 搜索的关键词按 URL 组件转义`() = runBlocking {
+        val eng = engine()
+        val src = searchSource("/s?q={{key}}&page={{page}}")
+        val cases = listOf(
+            "C#" to "C%23", "C++" to "C%2B%2B", "A&B" to "A%26B", "100%" to "100%25", "a b" to "a%20b",
+            "修真" to "%E4%BF%AE%E7%9C%9F",
+        )
+        for ((kw, encoded) in cases) {
+            eng.search(src, kw)
+            assertEquals("/s?q=$encoded&page=1", server.takeRequest().path, "关键词: $kw")
+        }
+        // {{keyword}} 是同一个变量，同样转义
+        eng.search(searchSource("/s?q={{keyword}}"), "C#")
+        assertEquals("/s?q=C%23", server.takeRequest().path)
+    }
+
+    @Test
+    fun `路径里的关键词也安全 —— 空格是 %20、斜杠不拆路径`() = runBlocking {
+        engine().search(searchSource("/so/{{key}}.html"), "a/b c+d")
+        assertEquals("/so/a%2Fb%20c%2Bd.html", server.takeRequest().path)
+    }
+
+    @Test
+    fun `GBK 站的关键词按站点编码转义，JS 拼出来的地址也一样`() = runBlocking {
+        val eng = engine()
+        eng.search(searchSource("""/s?q={{keyword}},{"charset":"gbk"}"""), "中文")
+        assertEquals("/s?q=%D6%D0%CE%C4", server.takeRequest().path)
+        // 脚本把原文关键词直接拼进地址：交给 OkHttp 会按 UTF-8 编码，GBK 站搜出来是乱码
+        eng.search(searchSource("""@js:'/s?q='+key+',{"charset":"gbk"}'"""), "中文")
+        assertEquals("/s?q=%D6%D0%CE%C4", server.takeRequest().path)
+    }
+
+    /** 选项块里有没加引号的 {{page}}、body 写成 JSON 对象 —— Legado 先展开模板再解析，对象 body 序列化成 JSON */
+    @Test
+    fun `选项先展开再解析，对象 body 按 JSON 发送`() = runBlocking {
+        val src = searchSource("""/s,{"method":"POST","body":{"keyword":"{{key}}","page":{{page}}}}""")
+        engine().search(src, "A\"B", page = 3)
+        val req = server.takeRequest()
+        assertEquals("POST", req.method)
+        assertEquals("/s", req.path)
+        assertEquals("""{"keyword":"A\"B","page":3}""", req.body.readUtf8())
+        assertTrue(req.getHeader("Content-Type")!!.startsWith("application/json"))
+    }
+
+    @Test
+    fun `解析不出来的选项块作废，但绝不留在地址里`() = runBlocking {
+        engine().search(searchSource("""/s?q={{key}},{"method":"POST","body":}"""), "x")
+        val req = server.takeRequest()
+        assertEquals("GET", req.method)
+        assertEquals("/s?q=x", req.path)
+    }
+
+    @Test
+    fun `splitUrlOptions 认对象 body 与未展开的选项块`() {
+        val (bare, opt) = splitUrlOptions("""https://a.com/api,{"method":"POST","body":{"id":1,"q":"x"}}""")!!
+        assertEquals("https://a.com/api", bare)
+        assertEquals("""{"id":1,"q":"x"}""", opt.body)
+        // 结构上是选项块、不是合法 JSON：地址照样切出来，选项作废
+        val (bare2, opt2) = splitUrlOptions("""https://a.com/api,{"body":{"page":{{page}}}}""")!!
+        assertEquals("https://a.com/api", bare2)
+        assertNull(opt2.method)
+        // `,{{` 是模板不是选项块
+        assertNull(splitUrlOptions("https://a.com/list?ids=1,{{page}}"))
+    }
+
+    // ---- 发现页 ----
+
+    @Test
+    fun `exploreUrl 的 && 与换行都是分隔符`() {
+        val items = parseExplore("玄幻::/a/{{page}}&&武侠::/b/{{page}}\n都市::/c/{{page}}", enabled = true)
+        assertEquals(listOf("玄幻", "武侠", "都市"), items.map { it.name })
+        assertEquals(listOf("/a/{{page}}", "/b/{{page}}", "/c/{{page}}"), items.map { it.url })
+    }
+
+    // ---- 跨阶段变量 ----
+
+    /**
+     * chapterList 上 java.put 的目录级变量，chapterUrl 的 @get 要取得到、也要随章节带出去；
+     * 详情页传进来的书级变量同样可见，但没改过的不在每章里重复。
+     */
+    @Test
+    fun `目录级与书级变量对章节项可见`() = runBlocking {
+        val json = """
+            {"bookSourceUrl":"$base","bookSourceName":"目录变量",
+             "ruleToc":{
+               "chapterList":"<js>java.put('bid','B9');JSON.stringify([{n:'第一章',u:'/vchap/1'},{n:'第二章',u:'/vchap/2'}])</js>",
+               "chapterName":"$.n",
+               "chapterUrl":"{{$.u}}?bid=@get:{bid}&book=@get:{book}"}}
+        """.trimIndent()
+        val toc = engine().getToc(
+            BookSourceRule.fromJson(json), "$base/vartoc", variables = mapOf("book" to "X"),
+        )
+        assertEquals(listOf("$base/vchap/1?bid=B9&book=X", "$base/vchap/2?bid=B9&book=X"), toc.map { it.url })
+        assertTrue(toc[0].variable.contains("B9"), "目录级变量随章节落库，实际: ${toc[0].variable}")
+        assertFalse(toc[0].variable.contains("\"book\""), "原样传进来的书级变量不必每章重复，实际: ${toc[0].variable}")
+    }
+
+    @Test
+    fun `详情页 put 的变量随详情带出`() = runBlocking {
+        // 键不加引号的 @put 是 Legado 文档里的写法
+        val json = sourceJson(base)
+            .replace("\"ruleBookInfo\": {", "\"ruleBookInfo\": { \"init\": \"@put:{bid:\\\"h1@text\\\"}\",")
+        val detail = engine().getDetail(BookSourceRule.fromJson(json), "$base/book/1")
+        assertEquals("魔道修真", detail.variables["bid"])
+    }
+
+    @Test
+    fun `正文先查本章变量、再查书级变量`() = runBlocking {
+        val json = """
+            {"bookSourceUrl":"$base","bookSourceName":"正文变量",
+             "ruleContent":{"content":"<js>java.get('book')+'/'+java.get('cid')</js>"}}
+        """.trimIndent()
+        val content = engine().getContent(
+            BookSourceRule.fromJson(json), "$base/chap/1",
+            chapterVariable = """{"cid":"c1"}""",
+            variables = mapOf("book" to "X", "cid" to "旧值"),
+        )
+        assertEquals("X/c1", (content.elements.first() as ContentElement.Paragraph).text)
+    }
+
+    // ---- 源级 replaceRegex ----
+
+    /** 一条写坏的源级正则从前让每一章都打不开；Legado 退回字面替换，其余规则照常生效 */
+    @Test
+    fun `源级 replaceRegex 有坏正则时退回字面替换，不判整章失败`() = runBlocking {
+        val src = source().let { s ->
+            s.copy(ruleContent = s.ruleContent!!.copy(replaceRegex = "##(广告\n##*少年*\n##本站广告.*##\n##钟响##\$x"))
+        }
+        val texts = engine().getContent(src, "$base/chap/1")
+            .elements.filterIsInstance<ContentElement.Paragraph>().map { it.text }
+        assertTrue(texts.none { it.contains("本站广告") }, "好的规则照常生效，实际: $texts")
+        // 替换串里的 $x 是非法组引用：退回字面替换，替换串也按字面
+        assertTrue(texts.contains("山那边传来一声\$x。"), "实际: $texts")
+    }
+
+    // ---- JS 渲染回退 ----
+
+    private class FakeRenderer(private val pages: Map<String, String>) : PageRenderer {
+        val calls = java.util.concurrent.CopyOnWriteArrayList<Pair<String, Map<String, String>>>()
+        override suspend fun render(url: String, headers: Map<String, String>, userAgent: String?): FetchedPage {
+            calls += url to headers
+            return FetchedPage(url, 200, pages[url] ?: "<html><body></body></html>", "UTF-8")
+        }
+    }
+
+    private fun renderEngine(renderer: PageRenderer) = BookSourceEngine(
+        SourceHttpClient(OkHttpClient(), retryBaseDelayMs = 1, allowPrivateNetwork = true),
+        { emptyList() },
+        scriptRuntime = com.radium.inkwell.core.source.js.RhinoScriptRuntime(),
+        renderer = renderer,
+    )
+
+    /**
+     * 记住「这一级要渲染」之后：渲染结果对不上规则要回静态再抓一遍（从前直接判空）；
+     * 别的阶段不受连累；POST 请求、选项后缀都不进渲染器。
+     */
+    @Test
+    fun `渲染记忆不是只许渲染 —— 按阶段记、对不上回静态、POST 不进渲染器`() = runBlocking {
+        val renderer = FakeRenderer(
+            mapOf("$base/js/chap" to """<html><body><div id="content"><p>渲染出来的正文。</p></div></body></html>"""),
+        )
+        val eng = renderEngine(renderer)
+        val src = source()
+
+        // 静态是空的 → 渲染成功 → 记住「正文要渲染」
+        val rendered = eng.getContent(src, "$base/js/chap")
+        assertEquals("渲染出来的正文。", (rendered.elements.single() as ContentElement.Paragraph).text)
+
+        // 另一章渲染结果是空页，静态那份是好的：回静态，而不是判这一章读不出来
+        val fallback = eng.getContent(src, "$base/chap/1")
+        assertTrue(fallback.elements.isNotEmpty())
+
+        // 目录这一级没记过：先静态，不该去惊动渲染器
+        renderer.calls.clear()
+        eng.getToc(src, "$base/book/1/toc")
+        assertTrue(renderer.calls.none { it.first.contains("/toc") }, "目录不该走渲染器: ${renderer.calls}")
+
+        // 带选项的 GET：交给渲染器的是剥掉选项的地址，选项里的 header 一并带上
+        eng.getContent(src, "$base/js/chap") // 再记一次「正文要渲染」
+        renderer.calls.clear()
+        eng.getContent(src, """$base/js/chap,{"headers":{"X-A":"1"}}""")
+        assertEquals("$base/js/chap", renderer.calls.first().first)
+        assertEquals("1", renderer.calls.first().second["X-A"])
+
+        // POST：渲染器只会 GET，method/body 交给它就丢了 —— 一律静态抓
+        renderer.calls.clear()
+        while (server.takeRequest(10, java.util.concurrent.TimeUnit.MILLISECONDS) != null) Unit // 清掉此前的请求记录
+        eng.getContent(src, """$base/chap/1,{"method":"POST","body":"a=1"}""")
+        assertTrue(renderer.calls.none { it.first.endsWith("/chap/1") || it.first.contains(",{") }, "${renderer.calls}")
+        val post = generateSequence { server.takeRequest(10, java.util.concurrent.TimeUnit.MILLISECONDS) }
+            .firstOrNull { it.path == "/chap/1" }
+        assertEquals("POST", post?.method)
+        assertEquals("a=1", post?.body?.readUtf8())
     }
 
     private companion object {

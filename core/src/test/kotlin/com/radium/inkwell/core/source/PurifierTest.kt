@@ -99,4 +99,36 @@ class PurifierTest {
         assertEquals(1, out.size)
         assertEquals("正文", (out[0] as ContentElement.Paragraph).text)
     }
+
+    // ---- 书源 replaceRegex（Legado 语义）----
+
+    @Test
+    fun `legado 模式：编译不过的正则退回字面替换`() {
+        val p = Purifier.legado(
+            listOf(
+                PurifyRule(pattern = "(广告", replacement = ""),
+                PurifyRule(pattern = "*推荐*", replacement = ""),
+                PurifyRule(pattern = "本站.*?完", replacement = ""),
+            ),
+        )
+        assertEquals("正文接着正文", p.apply("正文(广告*推荐*本站首发完接着正文"))
+    }
+
+    @Test
+    fun `legado 模式：替换串里的非法组引用退回字面替换`() {
+        val p = Purifier.legado(listOf(PurifyRule(pattern = "钟响", replacement = "\$x")))
+        assertEquals("一声\$x。", p.apply("一声钟响。"))
+    }
+
+    @Test
+    fun `legado 模式不放松超时 —— 病态正则照样在预算内中止`() {
+        assertFailsWith<PurifyTimeoutException> {
+            Purifier.legado(pathological()).apply(evilText)
+        }
+    }
+
+    @Test
+    fun `strict 照旧：坏正则就是硬错（规则编辑器的校验靠它）`() {
+        assertFailsWith<SourceException> { Purifier.strict(listOf(PurifyRule(pattern = "(广告"))) }
+    }
 }

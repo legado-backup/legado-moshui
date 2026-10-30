@@ -55,7 +55,12 @@ internal object IndxParser {
             while (pos < raw.size) {
                 val (len, consumed) = varint(raw, pos)
                 if (consumed == 0) break
-                if (len > 0 && pos + consumed + len <= raw.size) {
+                // 长度超出本记录剩余字节 = 记录损坏，到此为止。不能照旧 `pos += consumed + len.toInt()`：
+                // 损坏的 varint 能大到截成 Int 后为负（`0F 7F 7F 7F FB` → -5），pos 原地不动或往回走，
+                // 打开这本书就是一个停不下来的死循环。过了这道检查 pos 必然严格前进（consumed ≥ 1），
+                // 循环次数以记录长度为界。比的是剩余量而不是 pos + len：len 大到接近 Long 上限时加法会溢出。
+                if (len < 0 || len > (raw.size - pos - consumed).toLong()) break
+                if (len > 0) {
                     cncx[recordOffset + pos] = runCatching {
                         String(raw, pos + consumed, len.toInt(), charset)
                     }.getOrDefault("")
@@ -71,7 +76,8 @@ internal object IndxParser {
             if (!rec.hasMagic(0, "INDX")) continue
             val idxtPos = rec.u32(0x14).toInt()
             val count = rec.u32(0x18).toInt()
-            if (!rec.hasMagic(idxtPos, "IDXT") || count < 0) continue
+            // 每个偏移 2 字节，条目数不可能超过 IDXT 之后装得下的数量；损坏的 count（上亿）会在这里先分配巨型数组
+            if (!rec.hasMagic(idxtPos, "IDXT") || count < 0 || count > (rec.size - idxtPos - 4) / 2) continue
             val positions = IntArray(count + 1)
             for (j in 0 until count) positions[j] = rec.u16(idxtPos + 4 + 2 * j)
             positions[count] = idxtPos // 末条 entry 到 IDXT 为止（可能含零填充）

@@ -140,6 +140,36 @@ class ScriptRuntimeTest {
         assertEquals("ok", eval("java.ajax('u')"))
     }
 
+    /** 地址选项的 body 写成 JSON 对象要序列化发出去；选项块无论解析成没成都不能留在地址里 */
+    @Test
+    fun `ajax url options with object body and broken options`() {
+        val calls = mutableListOf<Triple<String, String, String?>>()
+        val http = object : JsHttp {
+            override fun fetch(
+                url: String,
+                method: String,
+                body: String?,
+                headers: Map<String, String>,
+            ): StrResponse {
+                calls += Triple(url, method, body)
+                return StrResponse(bodyText = "ok")
+            }
+            override fun cookieOf(url: String) = ""
+            override fun setCookie(url: String, cookie: String) = Unit
+            override fun removeCookie(url: String) = Unit
+        }
+        val java = JavaBridge(http, JsCache(), mutableMapOf())
+        java.ajax("""https://a.com/api,{"method":"POST","body":{"id":1}}""")
+        java.ajax("""https://a.com/api,{"method":"POST","body":}""")
+        assertEquals(
+            listOf(
+                Triple("https://a.com/api", "POST", """{"id":1}"""),
+                Triple("https://a.com/api", "GET", null),
+            ),
+            calls,
+        )
+    }
+
     @Test
     fun `same script can be evaluated twice after compile cache`() {
         // 编译缓存不能把第二次变成「作用域脏了 / 绑错变量」
